@@ -4,6 +4,7 @@ from .engine import AgentConsoleEngine
 from .evaluation import EvaluationViewState
 from .models import ConsoleState
 from .qualification import QualificationViewState
+from .tikhub import TikHubViewState
 from .widget import AgentConsoleWidget, ConsolePanels
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "ConsoleState",
     "EvaluationViewState",
     "QualificationViewState",
+    "TikHubViewState",
 ]

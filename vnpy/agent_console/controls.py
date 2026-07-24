@@ -23,6 +23,14 @@ ResearchAction = Literal[
     "disable_bridge",
 ]
 
+TikHubAction = Literal[
+    "disable_global",
+    "disable_entry",
+    "cancel_mission",
+    "refresh_status",
+    "get_evidence",
+]
+
 
 def research_control(action: ResearchAction, target_id: str) -> AgentEvent:
     if not target_id:
@@ -31,6 +39,28 @@ def research_control(action: ResearchAction, target_id: str) -> AgentEvent:
         event_type="research.control",
         payload={"action": action, "target_id": target_id, "contract_version": 1},
         priority=EventPriority.CRITICAL,
+    )
+
+
+def tikhub_control(action: TikHubAction, target_id: str) -> AgentEvent:
+    if not target_id:
+        raise ValueError("TikHub control target is required")
+    if action not in {
+        "disable_global",
+        "disable_entry",
+        "cancel_mission",
+        "refresh_status",
+        "get_evidence",
+    }:
+        raise ValueError("unsupported TikHub control")
+    return AgentEvent(
+        event_type="tikhub.control",
+        payload={"action": action, "target_id": target_id, "contract_version": 1},
+        priority=(
+            EventPriority.CRITICAL
+            if action in {"disable_global", "disable_entry", "cancel_mission"}
+            else EventPriority.ROUTINE
+        ),
     )
 
 

@@ -7,6 +7,7 @@ from vnpy.agent_bridge.events import AgentEvent
 from .models import ConsoleState
 from .mcp import MCP_EVENT_TYPES, McpViewState
 from .qualification import QUALIFICATION_EVENT_TYPES, QualificationViewState
+from .tikhub import TIKHUB_EVENT_TYPES, TikHubViewState
 
 
 class AgentConsoleEngine:
@@ -14,6 +15,7 @@ class AgentConsoleEngine:
         self._state = ConsoleState()
         self._mcp_state = McpViewState()
         self._qualification_state = QualificationViewState()
+        self._tikhub_state = TikHubViewState()
         self._lock = Lock()
 
     @property
@@ -31,8 +33,27 @@ class AgentConsoleEngine:
         with self._lock:
             return self._mcp_state
 
+    @property
+    def tikhub_state(self) -> TikHubViewState:
+        with self._lock:
+            return self._tikhub_state
+
     def apply(self, event: AgentEvent) -> ConsoleState:
         with self._lock:
+            if event.event_type in TIKHUB_EVENT_TYPES:
+                self._tikhub_state = self._tikhub_state.apply(
+                    event.event_type,
+                    event.payload,
+                    event.correlation_id,
+                    event.contract_version,
+                )
+                self._state = self._state.apply(
+                    "tikhub.state",
+                    self._tikhub_state.console_payload(),
+                    event.correlation_id,
+                    event.event_time_ms,
+                )
+                return self._state
             if event.event_type in MCP_EVENT_TYPES:
                 self._mcp_state = self._mcp_state.apply(
                     event.event_type,

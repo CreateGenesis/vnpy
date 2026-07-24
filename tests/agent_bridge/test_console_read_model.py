@@ -125,3 +125,19 @@ def test_console_routes_mcp_health_through_the_redacted_projection() -> None:
     assert "Authorization" not in str(state.mcp)
     panels = AgentConsoleWidget(state).panels()
     assert panels.mcp["calls"]["status"] == "blocked"
+
+
+def test_tikhub_and_generic_mcp_have_independent_revisions_errors_and_controls() -> None:
+    console = AgentConsoleEngine()
+    console.apply(AgentEvent("mcp.health", {"revision": 7, "status": "blocked", "implicit_context": False, "error": {"code": "MCP_UPSTREAM", "message": "blocked"}}))
+    state = console.apply(AgentEvent("tikhub.health", {
+        "revision": 3, "state": "degraded", "route_mode": "required_socks5h",
+        "checked_at_ms": 1, "latency_ms": 5, "provider_request_id": None,
+        "error_code": "UPSTREAM_UNAVAILABLE",
+    }))
+    panels = AgentConsoleWidget(state).panels()
+    assert panels.mcp["revision"] == 1
+    assert panels.tikhub["source_revisions"]["health"] == 3
+    assert panels.mcp["calls"]["error_code"] == "MCP_UPSTREAM"
+    assert panels.tikhub["health"]["error_code"] == "UPSTREAM_UNAVAILABLE"
+    assert panels.tikhub is not panels.mcp

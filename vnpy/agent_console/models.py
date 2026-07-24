@@ -22,6 +22,7 @@ _EVENT_FIELDS = {
     "capability.state": "capabilities",
     "sandbox.denial": "sandbox_denials",
     "mcp.state": "mcp",
+    "tikhub.state": "tikhub",
     "secret_broker.state": "secret_broker",
     "grant.state": "grants",
     "artifact.state": "artifacts",
@@ -59,6 +60,7 @@ class ConsoleState:
     capabilities: dict[str, Any] = field(default_factory=dict)
     sandbox_denials: dict[str, Any] = field(default_factory=dict)
     mcp: dict[str, Any] = field(default_factory=dict)
+    tikhub: dict[str, Any] = field(default_factory=dict)
     secret_broker: dict[str, Any] = field(default_factory=dict)
     grants: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)

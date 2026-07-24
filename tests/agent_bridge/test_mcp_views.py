@@ -13,7 +13,7 @@ def test_import_view_is_redacted_offline_and_visible_within_five_seconds() -> No
         "normalizer_version": "v1",
         "adapter_manifest_digest": "blake3:adapter",
         "candidate_set_digest": "blake3:candidate",
-        "entry_count": 16,
+        "entry_count": 2,
         "process_started": False,
         "network_started": False,
         "secret_lookup_performed": False,
@@ -22,22 +22,22 @@ def test_import_view_is_redacted_offline_and_visible_within_five_seconds() -> No
         "command": "npx",
         "args": ["Authorization: Bearer forbidden"],
         "raw_source": "forbidden",
-        "TIKHUB_API_KEY": "forbidden",
+        "MCP_SECRET": "forbidden",
     }
     state = McpViewState().apply_import(payload, "correlation", now)
-    assert state.import_status["entry_count"] == 16
+    assert state.import_status["entry_count"] == 2
     assert state.import_status["audit_state"] == "pending"
     assert state.projection_latency_ms <= 5_000
     encoded = str(state)
     assert "Authorization" not in encoded
-    assert "TIKHUB_API_KEY" not in encoded
+    assert "MCP_SECRET" not in encoded
     assert "raw_source" not in encoded
 
 
 def test_online_import_assertion_is_rejected_without_overwriting_last_good_state() -> None:
     now = time_ns() // 1_000_000
     state = McpViewState().apply_import(
-        {"status": "validated", "entry_count": 16, "process_started": False, "network_started": False},
+        {"status": "validated", "entry_count": 2, "process_started": False, "network_started": False},
         "good",
         now,
     )
@@ -58,7 +58,7 @@ def test_call_projection_keeps_operational_evidence_and_drops_untrusted_payload(
             "implicit_context": False,
             "result": {
                 "method": "mcp.tools.list",
-                "server_id": "tikhub-weibo",
+                "server_id": "research-news",
                 "correlation_id": "call-1",
                 "status": "ok",
                 "payload": {"tools": ["untrusted"], "Authorization": "forbidden"},

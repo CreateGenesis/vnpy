@@ -15,6 +15,7 @@ class ConsolePanels:
     budgets: dict[str, Any]
     capabilities: dict[str, Any]
     mcp: dict[str, Any]
+    tikhub: dict[str, Any]
     secret_broker: dict[str, Any]
     qualifications: dict[str, Any]
     grants: dict[str, Any]
@@ -41,6 +42,7 @@ class AgentConsoleWidget:
             budgets=dict(self.state.budgets),
             capabilities=dict(self.state.capabilities),
             mcp=dict(self.state.mcp),
+            tikhub=dict(self.state.tikhub),
             secret_broker=dict(self.state.secret_broker),
             qualifications=dict(self.state.qualifications),
             grants=dict(self.state.grants),
