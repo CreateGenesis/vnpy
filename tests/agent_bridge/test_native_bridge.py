@@ -1,6 +1,7 @@
 import importlib
 import importlib.machinery
 import importlib.util
+import gc
 import json
 from pathlib import Path
 from struct import unpack_from
@@ -51,8 +52,8 @@ def test_rust_python_golden_vector_and_bidirectional_mmap(tmp_path: Path) -> Non
     ) == 1
     raw_frame = python_ring.try_consume()
     assert raw_frame is not None
-    assert raw_frame[:4] == b"ATF1"
-    assert unpack_from("<H", raw_frame, 4)[0] == 1
+    assert raw_frame[:4] == b"ATF2"
+    assert unpack_from("<H", raw_frame, 4)[0] == 2
     assert raw_frame[6:10] == bytes((2, 1, 2, 1))
     assert unpack_from("<Q", raw_frame, 18)[0] == 1
 
@@ -111,3 +112,40 @@ def test_diagnostics_artifact_references_health_and_gate_are_research_only(tmp_p
     )
     assert gate["status"] == "completed"
     assert gate["trading_side_effects"] == 0
+
+
+def test_native_model_channel_replays_unacked_then_emits_recovery_complete(tmp_path: Path) -> None:
+    native_class = _native_bridge_class()
+    native = native_class(str(tmp_path), "model-loop-out", "model-loop-in", 4, 4)
+    payload = json.dumps(
+        {"contract_version": 1, "entity_type": "model_input", "symbol": "000001.SZ"}
+    ).encode()
+    assert native.publish_model_input(payload, "model-correlation-1", 1_000, 2_000) == 1
+    first = json.loads(native.consume_model_input(1_001))
+    assert first["frame_type"] == "model_input"
+    assert first["sequence"] == 1
+    assert first["replayed"] is False
+    assert first["payload"]["symbol"] == "000001.SZ"
+
+    del native
+    gc.collect()
+    recovered = native_class(str(tmp_path), "model-loop-out", "model-loop-in", 4, 4)
+    replayed = json.loads(recovered.consume_model_input(1_002))
+    assert replayed["sequence"] == 1
+    assert replayed["replayed"] is True
+    recovered.ack_model_input(
+        replayed["producer_id"],
+        replayed["producer_epoch"],
+        replayed["sequence"],
+        1_003,
+    )
+
+    assert recovered.model_input_recovery_complete("model-recovery-1", 1_004) == 2
+    marker = json.loads(recovered.consume_model_input(1_005))
+    assert marker["frame_type"] == "recovery_complete"
+    assert marker["sequence"] == 2
+    assert marker["payload"] is None
+    recovered.ack_model_input(
+        marker["producer_id"], marker["producer_epoch"], marker["sequence"], 1_006
+    )
+    assert recovered.replay_model_pending() == 0

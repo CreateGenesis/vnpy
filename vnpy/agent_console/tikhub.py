@@ -18,6 +18,7 @@ TIKHUB_EVENT_TYPES = frozenset(
         "tikhub.route",
         "tikhub.security",
         "tikhub.cutover",
+        "tikhub.isolation",
     }
 )
 
@@ -33,6 +34,7 @@ _FIELDS = {
     "tikhub.route": frozenset(("route_policy_ref", "mode", "state", "remote_dns", "leak_check", "exit_identity", "attested_at_ms", "error_code")),
     "tikhub.security": frozenset(("control", "status", "secret_lookup_performed", "process_started", "network_started", "evidence_ref", "error_code")),
     "tikhub.cutover": frozenset(("status", "legacy_assets", "legacy_registry", "tikhub_mcp_processes", "mcp_tikhub_egress", "fallback_attempts", "generic_mcp_regression", "evidence_ref")),
+    "tikhub.isolation": frozenset(("mission_id", "mission_state", "master_decision_digest", "purpose", "scope", "provider_budget_remaining", "provider_cost_certainty", "provenance_ref", "live_observer_allowed", "live_model_allowed", "automatic_wakeup_allowed", "error_code")),
 }
 
 _FORBIDDEN = ("authorization", "bearer ", "api_key", "cursor", "raw_content", "response_body")
@@ -121,6 +123,11 @@ class TikHubCutoverView(_TikHubPayloadView):
     pass
 
 
+@dataclass(frozen=True)
+class TikHubIsolationView(_TikHubPayloadView):
+    pass
+
+
 _VIEW_TYPES = {
     "tikhub.catalog": ("catalog", TikHubCatalogView),
     "tikhub.health": ("health", TikHubHealthView),
@@ -133,6 +140,7 @@ _VIEW_TYPES = {
     "tikhub.route": ("route", TikHubRouteView),
     "tikhub.security": ("security", TikHubSecurityView),
     "tikhub.cutover": ("cutover", TikHubCutoverView),
+    "tikhub.isolation": ("isolation", TikHubIsolationView),
 }
 
 
@@ -152,6 +160,7 @@ class TikHubViewState:
     route: TikHubRouteView | None = None
     security: TikHubSecurityView | None = None
     cutover: TikHubCutoverView | None = None
+    isolation: TikHubIsolationView | None = None
     last_error: str | None = None
 
     def apply(
@@ -176,6 +185,15 @@ class TikHubViewState:
             return replace(self, revision=next_revision, last_error="invalid redacted TikHub payload")
         if event_type == "tikhub.result" and body.get("untrusted") is not True:
             return replace(self, revision=next_revision, last_error="invalid TikHub trust label")
+        if event_type == "tikhub.isolation" and any(
+            body.get(field) is not False
+            for field in (
+                "live_observer_allowed",
+                "live_model_allowed",
+                "automatic_wakeup_allowed",
+            )
+        ):
+            return replace(self, revision=next_revision, last_error="invalid TikHub isolation")
         revisions = dict(self.source_revisions)
         revisions[field_name] = revision
         return replace(

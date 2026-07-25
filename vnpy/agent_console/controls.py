@@ -1,6 +1,6 @@
 """Versioned research controls published only through the Agent bridge."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 from vnpy.agent_bridge.autonomous_control import LifecycleRequest, lifecycle_request_event
@@ -30,6 +30,22 @@ TikHubAction = Literal[
     "refresh_status",
     "get_evidence",
 ]
+
+ModelSafetyAction = Literal[
+    "disable_paid_research", "disable_candidate_generation", "disable_training",
+    "disable_fast_action", "disable_new_admission", "disable_gray", "disable_all_agents",
+    "external_emergency_stop",
+]
+
+
+@dataclass(frozen=True)
+class OperatorPolicyEnvelope:
+    revision: int
+    allowed_symbols: tuple[str, ...]
+    max_total_exposure_bps: int
+    max_symbol_exposure_bps: int
+    max_order_bps: int
+    expires_at_ms: int
 
 
 def research_control(action: ResearchAction, target_id: str) -> AgentEvent:
@@ -61,6 +77,43 @@ def tikhub_control(action: TikHubAction, target_id: str) -> AgentEvent:
             if action in {"disable_global", "disable_entry", "cancel_mission"}
             else EventPriority.ROUTINE
         ),
+    )
+
+
+def model_safety_control(
+    action: ModelSafetyAction,
+    target_id: str,
+    policy_envelope_revision: int,
+) -> AgentEvent:
+    if not target_id or policy_envelope_revision < 0:
+        raise ValueError("model safety control identity is required")
+    return AgentEvent(
+        event_type="model.safety.control",
+        payload={
+            "contract_version": 2,
+            "action": action,
+            "target_id": target_id,
+            "policy_envelope_revision": policy_envelope_revision,
+            "routine_approval": False,
+        },
+        priority=EventPriority.CRITICAL,
+    )
+
+
+def model_policy_envelope_control(envelope: OperatorPolicyEnvelope) -> AgentEvent:
+    if (
+        envelope.revision < 0
+        or not 1 <= len(envelope.allowed_symbols) <= 5
+        or not 0 < envelope.max_total_exposure_bps <= 200
+        or not 0 < envelope.max_symbol_exposure_bps <= 50
+        or not 0 < envelope.max_order_bps <= 25
+        or envelope.expires_at_ms <= 0
+    ):
+        raise ValueError("invalid operator policy envelope")
+    return AgentEvent(
+        event_type="model.policy_envelope.configure",
+        payload={"contract_version": 2, **asdict(envelope), "routine_approval": False},
+        priority=EventPriority.CRITICAL,
     )
 
 
