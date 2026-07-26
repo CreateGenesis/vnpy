@@ -15,3 +15,12 @@ class AgentBridgeApp(BaseApp):
     engine_class = AgentBridgeEngine
     widget_name = "AgentBridgeWidget"
     icon_name = "agent.svg"
+    live_validation_contract_version = 1
+    live_validation_projection_store = "live-validation-projection-v1.json"
+
+    @classmethod
+    def open_research_bridge(cls, root: Path) -> AgentBridgeEngine:
+        """Open the bridge and rebuild only its durable read model."""
+        engine = cls.engine_class(root)
+        engine.recover_live_validation()
+        return engine

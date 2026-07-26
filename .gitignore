@@ -3,6 +3,13 @@
 *.pyo
 *.pyd
 *.egg-info/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env*
 
 # Jupyter
 .ipynb_checkpoints
@@ -22,6 +29,7 @@ dist
 
 # VeighNa
 .vntrader
+.agent-state/
 
 # Visual Studio intermediate files
 *.exp

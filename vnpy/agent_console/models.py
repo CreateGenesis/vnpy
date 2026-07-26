@@ -7,7 +7,8 @@ import json
 import math
 import re
 from time import time_ns
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping, TypeVar
 from unicodedata import normalize
 
 from blake3 import blake3
@@ -72,6 +73,14 @@ _SENSITIVE_KEYS = {
     "raw_header",
     "raw_headers",
     "prompt",
+}
+
+_LIVE_MODEL_FORBIDDEN = {
+    "model_supplied_score",
+    "self_score",
+    "self_pass",
+    "self_approved",
+    "approval_token",
 }
 
 
@@ -156,6 +165,171 @@ def _valid_summary_value(value: Any) -> bool:
             not isinstance(item, (list, dict)) and _valid_summary_value(item) for item in value
         )
     return False
+
+
+_LiveReadModelT = TypeVar("_LiveReadModelT", bound="LiveValidationReadModel")
+
+
+@dataclass(frozen=True)
+class LiveValidationReadModel:
+    """Immutable allowlisted values for one projection row."""
+
+    values: Mapping[str, Any]
+
+    @classmethod
+    def from_item(cls: type[_LiveReadModelT], item: dict[str, Any]) -> _LiveReadModelT:
+        if not isinstance(item, dict) or len(item) > 64:
+            raise ValueError("MALFORMED_LIVE_VALIDATION_ITEM")
+        copied: dict[str, Any] = {}
+        for key, value in item.items():
+            if (
+                not isinstance(key, str)
+                or key.lower() in _SENSITIVE_KEYS
+                or key.lower() in _LIVE_MODEL_FORBIDDEN
+                or not _valid_summary_value(value)
+            ):
+                raise ValueError("REDACTION_FAILED")
+            copied[key] = deepcopy(value)
+        return cls(MappingProxyType(copied))
+
+    def __getitem__(self, key: str) -> Any:
+        return self.values[key]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.values.get(key, default)
+
+    def as_dict(self) -> dict[str, Any]:
+        return deepcopy(dict(self.values))
+
+
+@dataclass(frozen=True)
+class LiveCampaignView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveRouteView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveCaseView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveCallView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveBudgetView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveTikHubProvenanceView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveScorecardView(LiveValidationReadModel):
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> "LiveScorecardView":
+        score_fields = {"score", "category_scores", "qualification", "qualified"}
+        if score_fields.intersection(item) and item.get(
+            "scorer_identity", item.get("score_producer")
+        ) != "harness":
+            raise ValueError("NON_HARNESS_SCORE")
+        return super().from_item(item)
+
+
+@dataclass(frozen=True)
+class LiveAuditView(LiveValidationReadModel):
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> "LiveAuditView":
+        if {"score", "model_score", "harness_score", "qualification"}.intersection(item):
+            raise ValueError("AUDIT_SCORE_FORBIDDEN")
+        return super().from_item(item)
+
+
+@dataclass(frozen=True)
+class LiveFailureView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveImprovementView(LiveValidationReadModel):
+    pass
+
+
+@dataclass(frozen=True)
+class LiveFinalView(LiveValidationReadModel):
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> "LiveFinalView":
+        if item.get("qualification_source", "harness") != "harness":
+            raise ValueError("NON_HARNESS_QUALIFICATION")
+        return super().from_item(item)
+
+
+_LIVE_MODEL_TYPES: dict[str, type[LiveValidationReadModel]] = {
+    "campaign": LiveCampaignView,
+    "route": LiveRouteView,
+    "case": LiveCaseView,
+    "call": LiveCallView,
+    "budget": LiveBudgetView,
+    "tikhub_provenance": LiveTikHubProvenanceView,
+    "scorecard": LiveScorecardView,
+    "audit": LiveAuditView,
+    "failure": LiveFailureView,
+    "improvement": LiveImprovementView,
+    "final": LiveFinalView,
+}
+
+
+@dataclass(frozen=True)
+class LiveValidationTypedPage:
+    campaign_id: str
+    candidate_digest: str
+    producer_epoch: int
+    revision: int
+    payload_digest: str
+    previous_payload_digest: str | None
+    page_kind: str
+    page_index: int
+    page_size: int
+    next_cursor: str | None
+    certainty: str
+    freshness: str
+    error_code: str | None
+    evidence_refs: tuple[str, ...]
+    permitted_next_actions: tuple[str, ...]
+    items: tuple[LiveValidationReadModel, ...]
+    event_time_ms: int
+
+    @classmethod
+    def from_event(cls, event: Any) -> "LiveValidationTypedPage":
+        payload = event.payload
+        model_type = _LIVE_MODEL_TYPES[payload["page_kind"]]
+        return cls(
+            campaign_id=event.campaign_id,
+            candidate_digest=event.candidate_digest,
+            producer_epoch=event.producer_epoch,
+            revision=event.revision,
+            payload_digest=event.payload_digest,
+            previous_payload_digest=event.previous_payload_digest,
+            page_kind=payload["page_kind"],
+            page_index=payload["page_index"],
+            page_size=payload["page_size"],
+            next_cursor=payload["next_cursor"],
+            certainty=payload["certainty"],
+            freshness=payload["freshness"],
+            error_code=payload["error_code"],
+            evidence_refs=tuple(payload["evidence_refs"]),
+            permitted_next_actions=tuple(payload["permitted_next_actions"]),
+            items=tuple(model_type.from_item(item) for item in payload["items"]),
+            event_time_ms=event.event_time_ms,
+        )
 
 
 def _validate_projection_section(section: Any, source_revision: int) -> str | None:

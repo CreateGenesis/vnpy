@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+from .evaluation import LiveValidationViewState
 from .models import ConsoleState
 
 
@@ -23,15 +24,24 @@ class ConsolePanels:
     audits: dict[str, Any]
     artifacts: dict[str, Any]
     evaluation: dict[str, Any]
+    live_validation: dict[str, Any]
     health: dict[str, Any]
 
 
 class AgentConsoleWidget:
-    def __init__(self, state: ConsoleState | None = None) -> None:
+    def __init__(
+        self,
+        state: ConsoleState | None = None,
+        live_validation_state: LiveValidationViewState | None = None,
+    ) -> None:
         self.state = state or ConsoleState()
+        self.live_validation_state = live_validation_state or LiveValidationViewState()
 
     def update_state(self, state: ConsoleState) -> None:
         self.state = state
+
+    def update_live_validation(self, state: LiveValidationViewState) -> None:
+        self.live_validation_state = state
 
     def panels(self) -> ConsolePanels:
         return ConsolePanels(
@@ -60,6 +70,7 @@ class AgentConsoleWidget:
                 "shadow": dict(self.state.shadow),
                 "baseline": dict(self.state.harness),
             },
+            live_validation=self.live_validation_state.console_payload(),
             health={
                 "bridge": self.state.bridge_health,
                 "observer_gate": dict(self.state.observer_gate),

@@ -38,6 +38,7 @@ dependencies = [
     "nbformat>=5.10.4",
     "requests>=2.32.0",
     "blake3>=1.0.5",
+    "cryptography>=44.0.0,<47.0.0",
     "qrcode>=7.4.2"
 ]
 keywords = ["quant", "quantitative", "investment", "trading", "algotrading"]
@@ -57,6 +58,13 @@ dev = [
     "scipy-stubs>=1.16.3.0",
     "hatchling>=1.27.0",
     "babel>=2.17.0",
+]
+agent-guidance-test = [
+    "pytest==8.4.2",
+    "pytest-qt==4.5.0",
+    "PySide6==6.8.2.1",
+    "blake3==1.0.5",
+    "cryptography>=44.0.0,<47.0.0",
 ]
 
 [project.urls]

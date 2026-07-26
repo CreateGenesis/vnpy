@@ -3,6 +3,7 @@ import importlib.machinery
 import importlib.util
 import gc
 import json
+import os
 from pathlib import Path
 from struct import unpack_from
 import sys
@@ -18,9 +19,18 @@ def _native_bridge_class() -> type:
         return importlib.import_module("vnpy_bridge_py").NativeBridge
     except ImportError:
         workspace = Path(__file__).resolve().parents[3]
+        target_roots = [workspace / "auto-tride-rust" / "target"]
+        if configured_target := os.environ.get("CARGO_TARGET_DIR"):
+            target_roots.insert(0, Path(configured_target))
         candidates = sorted(
-            list((workspace / "auto-tride-rust" / "target" / "debug" / "deps").glob("*vnpy_bridge_py*.dll"))
-            + list((workspace / "auto-tride-rust" / "target" / "debug" / "deps").glob("*vnpy_bridge_py*.so"))
+            {
+                candidate
+                for target_root in target_roots
+                for suffix in ("dll", "so", "dylib")
+                for candidate in (target_root / "debug" / "deps").glob(
+                    f"*vnpy_bridge_py*.{suffix}"
+                )
+            }
         )
         if not candidates:
             raise RuntimeError("build vnpy-bridge-py before running native bridge tests")

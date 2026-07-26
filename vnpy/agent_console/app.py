@@ -1,20 +1,23 @@
-"""vn.py app metadata for the Agent Console read model."""
+"""vn.py application registration for the authenticated Agent Console."""
 
 from pathlib import Path
 
 from vnpy.trader.app import BaseApp
 
 from .engine import AgentConsoleEngine
-from .tikhub import TikHubViewState
+from .ui import AgentConsoleWidget
 
 
 class AgentConsoleApp(BaseApp):
-    app_name = "AgentConsole"
-    app_module = "vnpy.agent_console"
-    app_path = Path(__file__).parent
-    display_name = "Agent Console"
+    """Expose the real Qt guidance workspace through vn.py's MainWindow."""
+
+    app_name: str = "AgentConsole"
+    app_module: str = __module__
+    app_path: Path = Path(__file__).parent
+    display_name: str = "Agent Console"
     engine_class = AgentConsoleEngine
-    widget_name = "AgentConsoleWidget"
-    icon_name = "agent.svg"
-    tikhub_read_model_class = TikHubViewState
-    tikhub_panel_name = "TikHub"
+    widget_name: str = "AgentConsoleWidget"
+    icon_name: str = ""
+
+
+__all__ = ["AgentConsoleApp", "AgentConsoleEngine", "AgentConsoleWidget"]

@@ -7,6 +7,8 @@ from time import time_ns
 from typing import Literal
 from uuid import uuid4
 
+import blake3
+
 from .events import AgentEvent, EventPriority
 
 
@@ -35,6 +37,23 @@ class LifecycleGateResult:
     event_time_ms: int = 0
     payload_hash: str = ""
     applied_lifecycle_revision: int | None = None
+    contract_version: int = 1
+
+
+@dataclass(frozen=True)
+class GuidanceStrategyLifecycleReceipt:
+    """vn.py-owned strategy-version lifecycle evidence for guidance retention."""
+
+    mission_id: str
+    notification_id: str
+    strategy_id: str
+    strategy_version: str
+    state: Literal["active", "terminated"]
+    lifecycle_revision: int
+    event_time_ms: int
+    terminated_at_ms: int | None
+    receipt_digest: str
+    producer_identity: str = "vnpy:autonomous-control"
     contract_version: int = 1
 
 
@@ -112,3 +131,75 @@ def correlate_vnpy_result(
     if result.status == "accepted" and result.applied_lifecycle_revision is None:
         return LifecycleGateResult(request.request_id, "blocked", "missing_lifecycle_revision")
     return result
+
+
+def create_guidance_strategy_lifecycle_receipt(
+    mission_id: str,
+    notification_id: str,
+    strategy_id: str,
+    strategy_version: str,
+    state: Literal["active", "terminated"],
+    lifecycle_revision: int,
+    *,
+    event_time_ms: int | None = None,
+    terminated_at_ms: int | None = None,
+) -> GuidanceStrategyLifecycleReceipt:
+    """Create content-free evidence without granting Agent lifecycle authority."""
+
+    event_time_ms = time_ns() // 1_000_000 if event_time_ms is None else event_time_ms
+    if not all((mission_id, notification_id, strategy_id, strategy_version)):
+        raise ValueError("guidance strategy lifecycle identity is required")
+    if state not in ("active", "terminated") or lifecycle_revision <= 0 or event_time_ms < 0:
+        raise ValueError("guidance strategy lifecycle state is invalid")
+    if state == "active" and terminated_at_ms is not None:
+        raise ValueError("active strategy cannot carry termination time")
+    if state == "terminated":
+        terminated_at_ms = event_time_ms if terminated_at_ms is None else terminated_at_ms
+        if terminated_at_ms < 0 or terminated_at_ms > event_time_ms:
+            raise ValueError("strategy termination time is invalid")
+    receipt = GuidanceStrategyLifecycleReceipt(
+        mission_id=mission_id,
+        notification_id=notification_id,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        state=state,
+        lifecycle_revision=lifecycle_revision,
+        event_time_ms=event_time_ms,
+        terminated_at_ms=terminated_at_ms,
+        receipt_digest="",
+    )
+    return replace(receipt, receipt_digest=_guidance_receipt_digest(receipt))
+
+
+def validate_guidance_strategy_lifecycle_receipt(
+    receipt: GuidanceStrategyLifecycleReceipt,
+) -> None:
+    """Fail closed on producer substitution, malformed time, or digest changes."""
+
+    if receipt.producer_identity != "vnpy:autonomous-control" or receipt.contract_version != 1:
+        raise ValueError("untrusted guidance strategy lifecycle producer")
+    expected = create_guidance_strategy_lifecycle_receipt(
+        receipt.mission_id,
+        receipt.notification_id,
+        receipt.strategy_id,
+        receipt.strategy_version,
+        receipt.state,
+        receipt.lifecycle_revision,
+        event_time_ms=receipt.event_time_ms,
+        terminated_at_ms=receipt.terminated_at_ms,
+    )
+    if expected.receipt_digest != receipt.receipt_digest:
+        raise ValueError("guidance strategy lifecycle digest mismatch")
+
+
+def _guidance_receipt_digest(receipt: GuidanceStrategyLifecycleReceipt) -> str:
+    value = asdict(receipt)
+    value.pop("receipt_digest", None)
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"blake3:{blake3.blake3(canonical).hexdigest()}"
