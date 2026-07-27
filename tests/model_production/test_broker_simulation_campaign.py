@@ -116,4 +116,3 @@ def test_pause_invalidates_runs_and_never_resumes_the_evidence_window(tmp_path: 
     assert {run.state for run in authority.runs("campaign-1")} == {"invalid"}
     with pytest.raises(RuntimeError, match="CAMPAIGN_TERMINAL"):
         authority.start_campaign("campaign-1", now_ms=1_300)
-

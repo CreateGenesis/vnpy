@@ -70,4 +70,3 @@ def test_binding_rejects_production_identity_and_non_loopback_routes(
     values.update(change)
     with pytest.raises(ValueError, match=reason):
         GatewayBinding.create(**values)
-

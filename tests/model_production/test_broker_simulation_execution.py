@@ -107,4 +107,3 @@ def test_wrong_binding_or_non_durable_authority_never_reaches_main_engine(
     with pytest.raises(PermissionError, match=reason):
         executor.submit(**kwargs)
     assert main_engine.calls == []
-
