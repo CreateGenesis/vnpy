@@ -26,6 +26,7 @@ def digest(label: str) -> str:
 class FakeBackend:
     commands: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     leak_readiness: bool = False
+    projection_revision: int = 4
 
     def readiness(self) -> dict[str, Any]:
         if self.leak_readiness:
@@ -36,7 +37,7 @@ class FakeBackend:
         return {
             "contract_version": 1,
             "entity_type": "investor_demo_projection",
-            "revision": 4,
+            "revision": self.projection_revision,
             "performance_scope": "broker_simulation",
             "candidate": {"candidate_digest": digest("candidate")},
             "current": {"label": "current_broker_simulation", "gateways": []},
@@ -195,6 +196,19 @@ def test_websocket_requires_session_and_same_origin() -> None:
         event = websocket.receive_json()
         assert event["event"] == "projection.snapshot"
         assert event["data"]["performance_scope"] == "broker_simulation"
+
+
+def test_websocket_keeps_streaming_projection_revisions_on_one_connection() -> None:
+    backend = FakeBackend()
+    client, _ = authenticated_client(backend)
+
+    with client.websocket_connect(
+        "/api/v1/events",
+        headers={"Origin": ORIGIN},
+    ) as websocket:
+        assert websocket.receive_json()["data"]["revision"] == 4
+        backend.projection_revision = 5
+        assert websocket.receive_json()["data"]["revision"] == 5
 
 
 @dataclass
