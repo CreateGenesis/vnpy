@@ -416,6 +416,33 @@ class BrokerSimulationAuthority:
         assert result is not None
         return result
 
+    def stop_campaign(self, campaign_id: str, *, now_ms: int) -> BrokerSimulationCampaign:
+        """Durably stop the campaign and every run without any external service."""
+
+        if now_ms <= 0:
+            raise ValueError("STOP_TIME_INVALID")
+        with self._lock, self._connection:
+            campaign = self.campaign(campaign_id)
+            assert campaign is not None
+            if campaign.state == "stopped":
+                return campaign
+            if campaign.state in _TERMINAL_CAMPAIGN_STATES:
+                raise RuntimeError("CAMPAIGN_TERMINAL")
+            if campaign.state not in {"prepared", "starting", "active"}:
+                raise RuntimeError("CAMPAIGN_TRANSITION_INVALID")
+            self._connection.execute(
+                "UPDATE broker_simulation_campaigns "
+                "SET state='stopped',revision=revision+1,updated_at_ms=? WHERE campaign_id=?",
+                (now_ms, campaign_id),
+            )
+            self._connection.execute(
+                "UPDATE broker_simulation_runs SET state='stopped',updated_at_ms=? WHERE campaign_id=?",
+                (now_ms, campaign_id),
+            )
+        result = self.campaign(campaign_id)
+        assert result is not None
+        return result
+
     def require_active_run(
         self, run_id: str, gateway_binding_digest: str
     ) -> BrokerSimulationRun:
