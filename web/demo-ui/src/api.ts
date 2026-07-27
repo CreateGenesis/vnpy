@@ -111,7 +111,88 @@ export interface ControlReceipt {
   [key: string]: unknown;
 }
 
-export interface DemoApi {
+export interface DynamicContent {
+  media_type: "text/plain; charset=utf-8" | "application/json";
+  body: unknown;
+  canonical_body_base64: string;
+  body_digest: string;
+}
+
+export type ProposalState = "pending" | "confirmed" | "rejected" | "expired" | "uncertain";
+
+export interface SideMasterProposal {
+  contract_version: 1;
+  entity_type: "side_master_approval_proposal";
+  proposal_id: string;
+  session_id: string;
+  mission_id: string;
+  side_master_identity: string;
+  source_turn_digest: string;
+  material_direction_change: true;
+  interpretation: string;
+  proposed_guidance: string;
+  provider_outcome: "certain" | "uncertain";
+  state: ProposalState;
+  created_at_ms: number;
+  expires_at_ms: number;
+  proposal_digest: string;
+}
+
+export interface SideMasterChatResult {
+  contract_version: 1;
+  entity_type: "demo_side_master_chat_result";
+  session_id: string;
+  mission_id: string;
+  state: "completed" | "uncertain";
+  reply: DynamicContent | null;
+  proposal: SideMasterProposal | null;
+  provider_outcome: "certain" | "uncertain";
+  result_digest: string;
+}
+
+export interface GuidanceRevision {
+  contract_version: 1;
+  entity_type: "confirmed_future_research_guidance";
+  guidance_id: string;
+  proposal_id: string;
+  proposal_digest: string;
+  mission_id: string;
+  guidance: string;
+  operator_identity_digest: string;
+  confirmed_at_ms: number;
+  scope: "future_research_only";
+  not_before_safe_boundary_revision: number;
+  delivery_id: string;
+  active_campaign_immutable: boolean;
+  signer_id: string;
+  verifying_key: string;
+  guidance_digest: string;
+  signature: string;
+}
+
+export interface ProposalDecisionReceipt {
+  proposal: SideMasterProposal;
+  guidance: GuidanceRevision | null;
+  idempotency_key: string;
+  decision_digest: string;
+}
+
+export interface SideMasterApi {
+  sendSideMasterMessage(
+    sessionId: string,
+    missionId: string,
+    content: string,
+    idempotencyKey: string,
+  ): Promise<SideMasterChatResult>;
+  decideSideMasterProposal(
+    proposalId: string,
+    expectedProposalDigest: string,
+    decision: "confirm" | "reject",
+    idempotencyKey: string,
+  ): Promise<ProposalDecisionReceipt>;
+}
+
+export interface DemoApi extends SideMasterApi {
   getProjection(): Promise<DemoProjection>;
   startCampaign(candidateDigest: string, gateways: GatewayName[]): Promise<ControlReceipt>;
   pauseCampaign(campaignId: string): Promise<ControlReceipt>;
@@ -185,6 +266,21 @@ export const createDemoApi = (): DemoApi => ({
   pauseCampaign: (campaignId) =>
     post<ControlReceipt>(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/pause`),
   emergencyStop: () => post<ControlReceipt>("/api/v1/emergency-stop"),
+  sendSideMasterMessage: (sessionId, missionId, content, requestKey) =>
+    post<SideMasterChatResult>("/api/v1/chat/messages", {
+      session_id: sessionId,
+      mission_id: missionId,
+      content,
+      idempotency_key: requestKey,
+    }),
+  decideSideMasterProposal: (proposalId, expectedProposalDigest, decision, requestKey) =>
+    post<ProposalDecisionReceipt>(
+      `/api/v1/chat/proposals/${encodeURIComponent(proposalId)}/${decision}`,
+      {
+        expected_proposal_digest: expectedProposalDigest,
+        idempotency_key: requestKey,
+      },
+    ),
   subscribe: (onProjection, onConnection) => {
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;

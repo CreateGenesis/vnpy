@@ -36,6 +36,7 @@ import type {
   GatewayProjection,
   HistoricalEvidenceProjection,
 } from "./api";
+import { SideMasterPanel } from "./components/SideMasterPanel";
 
 
 interface AppProps {
@@ -283,6 +284,7 @@ function EvidenceRow({ evidence }: { evidence: HistoricalEvidenceProjection }) {
 
 export function App({ api }: AppProps) {
   const client = useMemo(() => api ?? createDemoApi(), [api]);
+  const sideMasterSessionId = useMemo(() => `side-session-${crypto.randomUUID()}`, []);
   const [projection, setProjection] = useState<DemoProjection | null>(null);
   const [connection, setConnection] = useState<ConnectionView>({ state: "connecting", attempt: 0 });
   const [error, setError] = useState<string | null>(null);
@@ -456,6 +458,12 @@ export function App({ api }: AppProps) {
             </aside>
           </div>
         </section>
+
+        <SideMasterPanel
+          api={client}
+          sessionId={sideMasterSessionId}
+          missionId={`demo-research-${projection.candidate.candidate_digest}`}
+        />
 
         <section className="dashboard-section history-section" aria-labelledby="history-heading">
           <div className="section-heading">

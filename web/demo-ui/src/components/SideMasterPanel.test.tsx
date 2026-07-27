@@ -178,7 +178,7 @@ test("shows uncertain provider outcome with no retry or proposal effect", async 
   renderPanel(api);
   send("Explore a different factor family");
 
-  expect(await screen.findByText("Provider outcome uncertain")).toBeInTheDocument();
+  expect(await screen.findByRole("status")).toHaveTextContent("Provider outcome uncertain");
   expect(screen.getByText("No guidance was created")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Confirm proposal" })).not.toBeInTheDocument();
@@ -193,7 +193,7 @@ test("network retry reuses the idempotency key and does not duplicate the user t
   renderPanel(api);
   send("Retry this exact turn");
 
-  expect(await screen.findByText("Side Master unavailable")).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent("Side Master unavailable");
   const firstKey = vi.mocked(api.sendSideMasterMessage).mock.calls[0][3];
   fireEvent.click(screen.getByRole("button", { name: "Retry message" }));
 
@@ -203,4 +203,3 @@ test("network retry reuses the idempotency key and does not duplicate the user t
     expect(screen.getAllByText("Retry this exact turn")).toHaveLength(1);
   });
 });
-

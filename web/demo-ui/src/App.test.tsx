@@ -134,6 +134,8 @@ function apiMock(): {
     startCampaign: vi.fn().mockResolvedValue({ state: "starting" }),
     pauseCampaign: vi.fn().mockResolvedValue(controlReceipt("pause")),
     emergencyStop: vi.fn().mockResolvedValue(controlReceipt("emergency_stop")),
+    sendSideMasterMessage: vi.fn(),
+    decideSideMasterProposal: vi.fn(),
     subscribe: vi.fn((onProjection, onConnection) => {
       projectionListener = onProjection;
       connectionListener = onConnection;
