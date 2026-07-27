@@ -9,8 +9,22 @@ if TYPE_CHECKING:
     from .gray import GrayBudget
 
 
-_BROKER_STAGES = frozenset({"gray", "production"})
+_BROKER_STAGES = frozenset({"broker_simulation", "gray", "production"})
 _ORDER_ACTIONS = frozenset({"buy", "sell", "reduce", "close"})
+
+
+@dataclass(frozen=True)
+class BrokerSimulationRiskLimits:
+    """Integer ratios and operation ceilings for broker simulation."""
+
+    gross_exposure_numerator: int = 10
+    gross_exposure_denominator: int = 100
+    symbol_exposure_numerator: int = 1
+    symbol_exposure_denominator: int = 100
+    order_notional_numerator: int = 25
+    order_notional_denominator: int = 10_000
+    operations_per_second: int = 5
+    operations_per_session: int = 1_000
 
 
 @dataclass(frozen=True)
@@ -41,6 +55,12 @@ class AuthoritativeRiskContext:
     emergency_stop: bool = False
     eligible_symbols: frozenset[str] | None = None
     gray_budget: GrayBudget | None = None
+    nav_micros: int = 0
+    gross_exposure_micros: int = 0
+    symbol_exposure_micros: dict[str, int] | None = None
+    operations_last_second: int = 0
+    operations_this_session: int = 0
+    broker_simulation_limits: BrokerSimulationRiskLimits | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +149,42 @@ class RiskEvaluator:
             )
             reasons.extend(context.gray_budget.evaluate(gray_order))
 
+        if context.stage == "broker_simulation":
+            limits = context.broker_simulation_limits or BrokerSimulationRiskLimits()
+            if context.nav_micros <= 0:
+                reasons.append("NAV_UNAVAILABLE")
+            if not _valid_a_share_symbol(intent.symbol):
+                reasons.append("A_SHARE_SYMBOL_INVALID")
+            if context.operations_last_second >= limits.operations_per_second:
+                reasons.append("OPERATION_RATE_LIMIT")
+            if context.operations_this_session >= limits.operations_per_session:
+                reasons.append("SESSION_OPERATION_LIMIT")
+            if intent.quantity > 0 and intent.limit_price_micros > 0 and context.nav_micros > 0:
+                notional = intent.quantity * intent.limit_price_micros
+                maximum_order = (
+                    context.nav_micros
+                    * limits.order_notional_numerator
+                    // limits.order_notional_denominator
+                )
+                if notional > maximum_order:
+                    reasons.append("ORDER_NOTIONAL_LIMIT")
+                if intent.action == "buy":
+                    maximum_gross = (
+                        context.nav_micros
+                        * limits.gross_exposure_numerator
+                        // limits.gross_exposure_denominator
+                    )
+                    if context.gross_exposure_micros + notional > maximum_gross:
+                        reasons.append("TOTAL_EXPOSURE_LIMIT")
+                    symbol_exposure = (context.symbol_exposure_micros or {}).get(intent.symbol, 0)
+                    maximum_symbol = (
+                        context.nav_micros
+                        * limits.symbol_exposure_numerator
+                        // limits.symbol_exposure_denominator
+                    )
+                    if symbol_exposure + notional > maximum_symbol:
+                        reasons.append("SYMBOL_EXPOSURE_LIMIT")
+
         if intent.action not in _ORDER_ACTIONS:
             reasons.append("MODEL_ACTION_UNSUPPORTED")
         if intent.quantity <= 0:
@@ -170,3 +226,11 @@ class RiskEvaluator:
             reason_codes=unique_reasons,
             normalized_quantity=max(intent.quantity, 0),
         )
+
+
+def _valid_a_share_symbol(symbol: str) -> bool:
+    try:
+        ticker, exchange = symbol.split(".", 1)
+    except ValueError:
+        return False
+    return len(ticker) == 6 and ticker.isascii() and ticker.isdigit() and exchange in {"SH", "SZ", "BJ"}
