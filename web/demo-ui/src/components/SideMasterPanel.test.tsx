@@ -94,9 +94,10 @@ const apiMock = (
   ),
 });
 
-const renderPanel = (api: SideMasterApi) => render(
+const renderPanel = (api: SideMasterApi, available = true) => render(
   <SideMasterPanel
     api={api}
+    available={available}
     sessionId="side-session-1"
     missionId="research-mission-1"
   />,
@@ -202,4 +203,15 @@ test("network retry reuses the idempotency key and does not duplicate the user t
   await waitFor(() => {
     expect(screen.getAllByText("Retry this exact turn")).toHaveLength(1);
   });
+});
+
+test("shows backend unavailability and blocks conversation input", () => {
+  const api = apiMock();
+  renderPanel(api, false);
+
+  expect(screen.getAllByText("Side Master unavailable")).toHaveLength(2);
+  expect(screen.getByText("Research conversation service is not configured")).toBeInTheDocument();
+  expect(screen.getByLabelText("Research message")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  expect(api.sendSideMasterMessage).not.toHaveBeenCalled();
 });

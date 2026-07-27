@@ -1,6 +1,20 @@
 export type GatewayName = "XTP" | "TORA";
 export type ConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
 
+export interface DemoReadiness {
+  state: "ready" | "blocked";
+  ready: boolean;
+  candidate_digest: string;
+  components: Array<{
+    name: string;
+    state: string;
+  }>;
+  blockers: Array<{
+    code: string;
+    detail: string;
+  }>;
+}
+
 export interface LatencyProjection {
   count: number;
   p50: number;
@@ -193,6 +207,7 @@ export interface SideMasterApi {
 }
 
 export interface DemoApi extends SideMasterApi {
+  getReadiness(): Promise<DemoReadiness>;
   getProjection(): Promise<DemoProjection>;
   startCampaign(candidateDigest: string, gateways: GatewayName[]): Promise<ControlReceipt>;
   pauseCampaign(campaignId: string): Promise<ControlReceipt>;
@@ -256,6 +271,7 @@ const post = async <T>(path: string, body?: unknown): Promise<T> => {
 };
 
 export const createDemoApi = (): DemoApi => ({
+  getReadiness: () => request<DemoReadiness>("/api/v1/readiness"),
   getProjection: () => request<DemoProjection>("/api/v1/projection"),
   startCampaign: (candidateDigest, gateways) =>
     post<ControlReceipt>("/api/v1/campaigns", {

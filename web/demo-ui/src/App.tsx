@@ -32,6 +32,7 @@ import type {
   ControlReceipt,
   DemoApi,
   DemoProjection,
+  DemoReadiness,
   GatewayName,
   GatewayProjection,
   HistoricalEvidenceProjection,
@@ -286,6 +287,7 @@ export function App({ api }: AppProps) {
   const client = useMemo(() => api ?? createDemoApi(), [api]);
   const sideMasterSessionId = useMemo(() => `side-session-${crypto.randomUUID()}`, []);
   const [projection, setProjection] = useState<DemoProjection | null>(null);
+  const [readiness, setReadiness] = useState<DemoReadiness | null>(null);
   const [connection, setConnection] = useState<ConnectionView>({ state: "connecting", attempt: 0 });
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -295,9 +297,14 @@ export function App({ api }: AppProps) {
 
   useEffect(() => {
     let active = true;
-    client.getProjection()
-      .then((value) => active && setProjection(value))
-      .catch(() => active && setError("Projection unavailable"));
+    Promise.all([client.getProjection(), client.getReadiness()])
+      .then(([projectionValue, readinessValue]) => {
+        if (active) {
+          setProjection(projectionValue);
+          setReadiness(readinessValue);
+        }
+      })
+      .catch(() => active && setError("Application state unavailable"));
     const unsubscribe = client.subscribe(
       (value) => active && setProjection(value),
       (state, attempt) => active && setConnection({ state, attempt }),
@@ -333,7 +340,7 @@ export function App({ api }: AppProps) {
     }
   };
 
-  if (projection === null) {
+  if (projection === null || readiness === null) {
     return (
       <main className="loading-state">
         <RefreshCw className="spin" size={22} />
@@ -352,6 +359,9 @@ export function App({ api }: AppProps) {
   const canStart = projection.permitted_actions.includes("start");
   const canPause = projection.permitted_actions.includes("pause") && projection.current.campaign_id !== null;
   const canStop = projection.permitted_actions.includes("emergency_stop");
+  const sideMasterAvailable = readiness.components.some(
+    (component) => component.name === "side-master" && component.state !== "unavailable",
+  );
 
   return (
     <div className="app-shell">
@@ -435,7 +445,9 @@ export function App({ api }: AppProps) {
           </div>
           <div className="current-grid">
             <div className="gateway-grid">
-              {projection.current.gateways.map((run) => <GatewayRun key={run.gateway} run={run} />)}
+              {projection.current.gateways.length > 0
+                ? projection.current.gateways.map((run) => <GatewayRun key={run.gateway} run={run} />)
+                : <div className="empty-state current-empty">No active gateway runs</div>}
             </div>
             <aside className="chart-panel" aria-label="Current and historical profit comparison">
               <div className="chart-title">
@@ -443,17 +455,24 @@ export function App({ api }: AppProps) {
                 <span>Current vs signed history</span>
               </div>
               <div className="chart-legend"><span className="current-key" />Current <span className="history-key" />Historical</div>
-              <div className="profit-chart">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={chartData} margin={{ top: 12, right: 8, left: -16, bottom: 0 }}>
-                    <CartesianGrid stroke="#e2e6e0" vertical={false} />
-                    <XAxis dataKey="gateway" tickLine={false} axisLine={false} />
-                    <YAxis tickLine={false} axisLine={false} />
-                    <Tooltip formatter={(value: number) => `¥${value.toFixed(2)}`} />
-                    <Bar dataKey="current" fill="#176b57" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="historical" fill="#2867a6" radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
+              <div className={chartData.length > 0 ? "profit-chart" : "profit-chart empty-chart"}>
+                {chartData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={chartData} margin={{ top: 12, right: 8, left: -16, bottom: 0 }}>
+                      <CartesianGrid stroke="#e2e6e0" vertical={false} />
+                      <XAxis dataKey="gateway" tickLine={false} axisLine={false} />
+                      <YAxis tickLine={false} axisLine={false} />
+                      <Tooltip formatter={(value: number) => `¥${value.toFixed(2)}`} />
+                      <Bar dataKey="current" fill="#176b57" radius={[3, 3, 0, 0]} />
+                      <Bar dataKey="historical" fill="#2867a6" radius={[3, 3, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="chart-empty-state">
+                    <Activity size={18} />
+                    <span>No current or signed profit data</span>
+                  </div>
+                )}
               </div>
             </aside>
           </div>
@@ -461,6 +480,7 @@ export function App({ api }: AppProps) {
 
         <SideMasterPanel
           api={client}
+          available={sideMasterAvailable}
           sessionId={sideMasterSessionId}
           missionId={`demo-research-${projection.candidate.candidate_digest}`}
         />

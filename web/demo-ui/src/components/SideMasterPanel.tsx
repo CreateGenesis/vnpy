@@ -18,6 +18,7 @@ import type {
 
 interface SideMasterPanelProps {
   api: SideMasterApi;
+  available: boolean;
   sessionId: string;
   missionId: string;
 }
@@ -52,11 +53,11 @@ const stateLabel = (state: ChatState): string => {
   return "Ready";
 };
 
-export function SideMasterPanel({ api, sessionId, missionId }: SideMasterPanelProps) {
+export function SideMasterPanel({ api, available, sessionId, missionId }: SideMasterPanelProps) {
   const [content, setContent] = useState("");
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
   const [proposals, setProposals] = useState<ProposalView[]>([]);
-  const [chatState, setChatState] = useState<ChatState>("ready");
+  const [chatState, setChatState] = useState<ChatState>(available ? "ready" : "unavailable");
   const [retry, setRetry] = useState<{ content: string; key: string } | null>(null);
   const decisionKeys = useRef(new Map<string, string>());
 
@@ -112,7 +113,7 @@ export function SideMasterPanel({ api, sessionId, missionId }: SideMasterPanelPr
 
   const submit = (): void => {
     const message = content.trim();
-    if (!message || chatState === "sending") return;
+    if (!available || !message || chatState === "sending") return;
     void sendMessage(message, operationKey("chat"), true);
   };
 
@@ -206,6 +207,15 @@ export function SideMasterPanel({ api, sessionId, missionId }: SideMasterPanelPr
               </div>
             </div>
           )}
+          {chatState === "unavailable" && retry === null && (
+            <div className="guidance-notice error" role="status">
+              <AlertTriangle size={16} />
+              <div>
+                <strong>Side Master unavailable</strong>
+                <span>Research conversation service is not configured</span>
+              </div>
+            </div>
+          )}
 
           <div className="proposal-list">
             {proposals.map((item) => (
@@ -270,13 +280,13 @@ export function SideMasterPanel({ api, sessionId, missionId }: SideMasterPanelPr
               rows={3}
               maxLength={8_000}
               value={content}
-              disabled={chatState === "sending"}
+              disabled={!available || chatState === "sending"}
               onChange={(event) => setContent(event.target.value)}
             />
             <button
               className="button primary"
               type="submit"
-              disabled={!content.trim() || chatState === "sending"}
+              disabled={!available || !content.trim() || chatState === "sending"}
             >
               <Send size={15} />Send message
             </button>

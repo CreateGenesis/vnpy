@@ -2,7 +2,13 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { vi } from "vitest";
 
 import { App } from "./App";
-import type { ConnectionState, ControlReceipt, DemoApi, DemoProjection } from "./api";
+import type {
+  ConnectionState,
+  ControlReceipt,
+  DemoApi,
+  DemoProjection,
+  DemoReadiness,
+} from "./api";
 
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`;
@@ -122,6 +128,18 @@ const projection: DemoProjection = {
   permitted_actions: ["pause", "emergency_stop"],
 };
 
+const readiness: DemoReadiness = {
+  state: "ready",
+  ready: true,
+  candidate_digest: digest("a"),
+  components: [
+    { name: "run-xtp", state: "configured" },
+    { name: "run-tora", state: "configured" },
+    { name: "side-master", state: "configured" },
+  ],
+  blockers: [],
+};
+
 function apiMock(): {
   api: DemoApi;
   emitProjection: (value: DemoProjection) => void;
@@ -130,6 +148,7 @@ function apiMock(): {
   let projectionListener: (value: DemoProjection) => void = () => undefined;
   let connectionListener: (state: ConnectionState, attempt: number) => void = () => undefined;
   const api: DemoApi = {
+    getReadiness: vi.fn().mockResolvedValue(readiness),
     getProjection: vi.fn().mockResolvedValue(projection),
     startCampaign: vi.fn().mockResolvedValue({ state: "starting" }),
     pauseCampaign: vi.fn().mockResolvedValue(controlReceipt("pause")),
@@ -161,6 +180,35 @@ test("renders current broker activity separately from historical signed evidence
   expect(screen.getByTestId("history-XTP-profit")).toHaveTextContent("¥100.00");
   expect(screen.getByTestId("history-TORA-profit")).toHaveTextContent("¥80.00");
   expect(screen.getByText("Simulation only")).toBeInTheDocument();
+});
+
+test("renders explicit empty and unavailable states without implying service readiness", async () => {
+  const mock = apiMock();
+  mock.api.getProjection = vi.fn().mockResolvedValue({
+    ...projection,
+    current: {
+      ...projection.current,
+      campaign_id: null,
+      campaign_digest: null,
+      campaign_state: "unavailable",
+      gateways: [],
+    },
+    history: [],
+  });
+  mock.api.getReadiness = vi.fn().mockResolvedValue({
+    ...readiness,
+    state: "blocked",
+    ready: false,
+    components: readiness.components.map((component) =>
+      component.name === "side-master" ? { ...component, state: "unavailable" } : component),
+  });
+
+  render(<App api={mock.api} />);
+
+  expect(await screen.findByText("No active gateway runs")).toBeInTheDocument();
+  expect(screen.getByText("No current or signed profit data")).toBeInTheDocument();
+  expect(screen.getAllByText("Side Master unavailable")).toHaveLength(2);
+  expect(screen.getByLabelText("Research message")).toBeDisabled();
 });
 
 test("shows dual gateway metrics, evidence identities, and narrow-screen-safe long values", async () => {
