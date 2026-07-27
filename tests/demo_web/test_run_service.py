@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from vnpy.agent_bridge.native_bridge import NativeModelBridge
-from vnpy.demo_web.run_service import BrokerSimulationRunHost
+from vnpy.demo_web.run_service import BrokerSimulationRunHost, _settings_fingerprints
 from vnpy.event import Event
 from vnpy.trader.constant import Exchange
 from vnpy.trader.event import EVENT_TICK
@@ -200,6 +200,40 @@ def test_run_host_rejects_gateway_settings_that_drift_from_approved_binding(
         assert str(exc) == "RUN_BINDING_SETTINGS_DRIFT"
     else:
         raise AssertionError("gateway settings drift was accepted")
+
+
+def test_gateway_fingerprints_use_exact_installed_plugin_field_names(tmp_path: Path) -> None:
+    secrets = tmp_path / ".demo-secrets"
+    secrets.mkdir()
+    cases = {
+        "XTP": {
+            "账号": "xtp-simulation",
+            "行情地址": "quote.simulation.invalid",
+            "行情端口": 10001,
+            "交易地址": "trade.simulation.invalid",
+            "交易端口": 10002,
+        },
+        "TORA": {
+            "账号": "tora-simulation",
+            "行情服务器": "tcp://quote.simulation.invalid:20001",
+            "交易服务器": "tcp://trade.simulation.invalid:20002",
+        },
+    }
+    server_keys = {
+        "XTP": ("行情地址", "行情端口", "交易地址", "交易端口"),
+        "TORA": ("行情服务器", "交易服务器"),
+    }
+
+    for gateway, settings in cases.items():
+        relative = f".demo-secrets/{gateway.lower()}-settings.json"
+        (tmp_path / relative).write_text(
+            json.dumps(settings, ensure_ascii=False), encoding="utf-8"
+        )
+        server, account = _settings_fingerprints(tmp_path, gateway, relative)
+        assert server == payload_digest(
+            {key: settings[key] for key in server_keys[gateway]}
+        )
+        assert account == payload_digest({"账号": settings["账号"]})
 
 
 def test_active_run_restores_model_loop_after_host_restart(tmp_path: Path) -> None:
