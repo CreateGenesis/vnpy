@@ -232,7 +232,7 @@ class RecordingTransport:
 def test_per_run_client_is_loopback_bound_and_has_no_generic_or_trading_methods() -> None:
     transport = RecordingTransport()
     client = BrokerSimulationRunClient(
-        RunClientBinding("XTP", digest("run:XTP"), "http://127.0.0.1:18765"),
+        RunClientBinding("XTP", digest("run:XTP"), "tcp://127.0.0.1:18765"),
         transport,
     )
 

@@ -189,7 +189,7 @@ def guidance_client(
 ) -> SideMasterGuidanceClient:
     return SideMasterGuidanceClient(
         GuidanceClientBinding(
-            endpoint="http://127.0.0.1:18770",
+            endpoint="tcp://127.0.0.1:18770",
             operator_identity_digest=digest("operator"),
         ),
         transport,
@@ -380,4 +380,3 @@ def test_guidance_surface_has_no_main_master_generic_rpc_or_trading_capability()
         "chat_with_main_master",
     ):
         assert not hasattr(guidance, forbidden_method)
-

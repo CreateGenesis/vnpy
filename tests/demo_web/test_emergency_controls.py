@@ -67,11 +67,11 @@ class NoCallTransport:
 def clients(transport: Any) -> tuple[BrokerSimulationRunClient, ...]:
     return (
         BrokerSimulationRunClient(
-            RunClientBinding("XTP", digest("run:XTP"), "http://127.0.0.1:19701"),
+            RunClientBinding("XTP", digest("run:XTP"), "tcp://127.0.0.1:19701"),
             transport,
         ),
         BrokerSimulationRunClient(
-            RunClientBinding("TORA", digest("run:TORA"), "http://127.0.0.1:19702"),
+            RunClientBinding("TORA", digest("run:TORA"), "tcp://127.0.0.1:19702"),
             transport,
         ),
     )

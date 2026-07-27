@@ -70,7 +70,7 @@ class RunClientBinding:
         except ValueError as exc:
             raise ValueError("RUN_CLIENT_LOOPBACK_REQUIRED") from exc
         if (
-            parsed.scheme != "http"
+            parsed.scheme != "tcp"
             or parsed.hostname != "127.0.0.1"
             or port is None
             or not 1 <= port <= 65_535
