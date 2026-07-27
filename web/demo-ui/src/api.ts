@@ -90,8 +90,24 @@ export interface DemoProjection {
   permitted_actions: Array<"start" | "pause" | "emergency_stop">;
 }
 
-export interface ControlReceipt {
+export interface ControlGatewayReceipt {
+  gateway: GatewayName;
   state: string;
+  receipt_digest?: string;
+  error_code?: string;
+  data?: Record<string, unknown>;
+}
+
+export interface ControlReceipt {
+  contract_version?: 1;
+  action?: "pause" | "emergency_stop";
+  state: string;
+  request_digest?: string;
+  started_at_ns?: number;
+  completed_at_ns?: number;
+  hard_stop_deadline_met?: boolean;
+  gateways?: ControlGatewayReceipt[];
+  receipt_digest?: string;
   [key: string]: unknown;
 }
 

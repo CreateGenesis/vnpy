@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock3,
+  FileLock2,
   FileCheck2,
   Gauge,
   History,
@@ -28,6 +29,7 @@ import {
 import { createDemoApi } from "./api";
 import type {
   ConnectionState,
+  ControlReceipt,
   DemoApi,
   DemoProjection,
   GatewayName,
@@ -45,9 +47,15 @@ interface ConnectionView {
   attempt: number;
 }
 
+type ConfirmationAction = "pause" | "emergency_stop";
+
 const money = (minor: number): string => {
   const sign = minor < 0 ? "-" : "";
-  return `${sign}¥${(Math.abs(minor) / 100).toFixed(2)}`;
+  const value = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(minor) / 100);
+  return `${sign}¥${value}`;
 };
 
 const basisPoints = (value: number): string => `${(value / 100).toFixed(2)}%`;
@@ -122,6 +130,33 @@ function GatewayRun({ run }: { run: GatewayProjection }) {
         <span><ShieldCheck size={15} />{run.unresolved_outcomes} unresolved</span>
       </div>
 
+      <div className="containment-grid" aria-label={`${run.gateway} containment state`}>
+        <Metric
+          label="Residual exposure"
+          value={money(run.residual_exposure_minor)}
+          tone={run.residual_exposure_minor > 0 ? "warning" : undefined}
+        />
+        <div className="metric" data-testid={`${run.gateway}-working-orders`}>
+          <span>Working orders</span>
+          <strong className={run.working_order_count > 0 ? "metric-value warning" : "metric-value"}>
+            {run.working_order_count}
+          </strong>
+        </div>
+        <div className="metric" data-testid={`${run.gateway}-unresolved-outcomes`}>
+          <span>Unresolved outcomes</span>
+          <strong className={run.unresolved_outcomes > 0 ? "metric-value warning" : "metric-value"}>
+            {run.unresolved_outcomes}
+          </strong>
+        </div>
+        <div className="metric next-action">
+          <span>Permitted next action</span>
+          <strong>{titleCase(run.permitted_next_action)}</strong>
+        </div>
+        <span className="sr-only" data-testid={`${run.gateway}-residual-exposure`}>
+          {money(run.residual_exposure_minor)}
+        </span>
+      </div>
+
       {run.positions.length > 0 && (
         <div className="positions">
           <h4>Positions</h4>
@@ -135,7 +170,14 @@ function GatewayRun({ run }: { run: GatewayProjection }) {
                   <tr key={position.symbol}>
                     <td>{position.symbol}</td>
                     <td>{position.quantity}</td>
-                    <td>{position.available_quantity}</td>
+                    <td>
+                      {position.available_quantity}
+                      {position.t_plus_one_locked_quantity > 0 && (
+                        <span className="quantity-detail">
+                          {position.t_plus_one_locked_quantity} locked T+1
+                        </span>
+                      )}
+                    </td>
                     <td>{money(position.marked_value_minor)}</td>
                     <td className={position.unrealized_profit_minor >= 0 ? "positive" : "negative"}>
                       {money(position.unrealized_profit_minor)}
@@ -148,6 +190,66 @@ function GatewayRun({ run }: { run: GatewayProjection }) {
         </div>
       )}
     </article>
+  );
+}
+
+function ControlReceiptView({ receipt }: { receipt: ControlReceipt }) {
+  return (
+    <section className="receipt-band" role="status" aria-label="Immutable control receipt">
+      <div className="receipt-summary">
+        <FileLock2 size={18} />
+        <div>
+          <strong>Immutable control receipt</strong>
+          <span>{titleCase(receipt.action ?? "control")} · {titleCase(receipt.state)}</span>
+        </div>
+      </div>
+      <div className="receipt-gateways">
+        {(receipt.gateways ?? []).map((gateway) => (
+          <span key={gateway.gateway}>{gateway.gateway} {titleCase(gateway.state)}</span>
+        ))}
+        <span className={receipt.hard_stop_deadline_met === false ? "warning" : "ok"}>
+          {receipt.hard_stop_deadline_met === false ? "Deadline uncertain" : "Deadline met"}
+        </span>
+      </div>
+      <code className="digest" title="Control receipt digest">{receipt.receipt_digest}</code>
+    </section>
+  );
+}
+
+function ConfirmationDialog({
+  action,
+  onCancel,
+  onConfirm,
+}: {
+  action: ConfirmationAction;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const emergency = action === "emergency_stop";
+  const title = emergency ? "Confirm emergency stop" : "Confirm pause campaign";
+  return (
+    <div className="dialog-backdrop">
+      <section className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmation-title">
+        <div className={emergency ? "dialog-icon danger" : "dialog-icon warning"}>
+          {emergency ? <Octagon size={22} /> : <Pause size={22} />}
+        </div>
+        <div className="dialog-copy">
+          <h2 id="confirmation-title">{title}</h2>
+          <p>
+            {emergency
+              ? "New exposure will be blocked immediately and eligible working orders will enter vn.py containment."
+              : "The current five-session evidence window will end and cannot be resumed."}
+          </p>
+        </div>
+        <div className="dialog-actions">
+          <button className="button secondary" onClick={onCancel}>Cancel</button>
+          <button className={emergency ? "button danger" : "button primary"} onClick={onConfirm}>
+            {emergency ? <Octagon size={16} /> : <Pause size={16} />}
+            {emergency ? "Confirm emergency stop" : "Confirm pause"}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -186,6 +288,8 @@ export function App({ api }: AppProps) {
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [actionResult, setActionResult] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<ConfirmationAction | null>(null);
+  const [controlReceipt, setControlReceipt] = useState<ControlReceipt | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -202,17 +306,28 @@ export function App({ api }: AppProps) {
     };
   }, [client]);
 
-  const runAction = async (name: string, operation: () => Promise<{ state: string }>): Promise<void> => {
+  const runAction = async (name: string, operation: () => Promise<ControlReceipt>): Promise<void> => {
     setPendingAction(name);
     setError(null);
     setActionResult(null);
     try {
       const result = await operation();
       setActionResult(titleCase(result.state));
+      if (result.receipt_digest) setControlReceipt(result);
     } catch {
       setError(`${name} failed`);
     } finally {
       setPendingAction(null);
+    }
+  };
+
+  const confirmControl = (): void => {
+    const action = confirmation;
+    setConfirmation(null);
+    if (action === "pause") {
+      void runAction("Pause campaign", () => client.pauseCampaign(projection?.current.campaign_id ?? ""));
+    } else if (action === "emergency_stop") {
+      void runAction("Emergency stop", () => client.emergencyStop());
     }
   };
 
@@ -291,15 +406,14 @@ export function App({ api }: AppProps) {
             <button
               className="button secondary"
               disabled={!canPause || pendingAction !== null}
-              onClick={() => void runAction("Pause campaign", () =>
-                client.pauseCampaign(projection.current.campaign_id ?? ""))}
+              onClick={() => setConfirmation("pause")}
             >
               <Pause size={16} />Pause campaign
             </button>
             <button
               className="button danger"
               disabled={!canStop || pendingAction !== null}
-              onClick={() => void runAction("Emergency stop", () => client.emergencyStop())}
+              onClick={() => setConfirmation("emergency_stop")}
             >
               <Octagon size={16} />Emergency stop
             </button>
@@ -307,6 +421,7 @@ export function App({ api }: AppProps) {
         </section>
 
         {error && <div className="error-band" role="alert"><AlertTriangle size={16} />{error}</div>}
+        {controlReceipt && <ControlReceiptView receipt={controlReceipt} />}
 
         <section className="dashboard-section current-section" aria-labelledby="current-heading">
           <div className="section-heading">
@@ -357,6 +472,13 @@ export function App({ api }: AppProps) {
           </div>
         </section>
       </main>
+      {confirmation && (
+        <ConfirmationDialog
+          action={confirmation}
+          onCancel={() => setConfirmation(null)}
+          onConfirm={confirmControl}
+        />
+      )}
     </div>
   );
 }

@@ -257,7 +257,7 @@ test("shows immutable control receipts and contained run risk", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Confirm pause" }));
 
   const receipt = await screen.findByRole("status", { name: "Immutable control receipt" });
-  expect(receipt).toHaveTextContent(controlReceipt("pause").receipt_digest);
+  expect(receipt).toHaveTextContent(controlReceipt("pause").receipt_digest ?? "");
   expect(receipt).toHaveTextContent("XTP paused");
   expect(receipt).toHaveTextContent("TORA paused");
   expect(receipt).toHaveTextContent("Deadline met");
