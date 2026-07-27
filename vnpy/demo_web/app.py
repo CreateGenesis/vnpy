@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from asyncio import sleep
 from collections.abc import Mapping
 from dataclasses import dataclass
 from html import escape
@@ -11,7 +12,16 @@ from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, WebSocket
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -229,15 +239,20 @@ def create_demo_app(config: DemoWebConfig, backend: DemoWebBackend) -> FastAPI:
         if websocket.headers.get("origin") != config.allowed_origin:
             await websocket.close(code=4403)
             return
-        try:
-            projection = backend.projection()
-            _assert_public_response(projection)
-        except Exception:
-            await websocket.close(code=1011)
-            return
         await websocket.accept()
-        await websocket.send_json({"event": "projection.snapshot", "data": projection})
-        await websocket.close(code=1000)
+        while True:
+            try:
+                projection = backend.projection()
+                _assert_public_response(projection)
+                await websocket.send_json(
+                    {"event": "projection.snapshot", "data": projection}
+                )
+                await sleep(1)
+            except WebSocketDisconnect:
+                return
+            except Exception:
+                await websocket.close(code=1011)
+                return
 
     app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
 
