@@ -11,9 +11,13 @@ export default defineConfig({
   build: {
     outDir: "../../vnpy/demo_web/static",
     emptyOutDir: true,
-  },
-  test: {
-    environment: "jsdom",
-    setupFiles: "./src/test-setup.ts",
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          charts: ["recharts"],
+          icons: ["lucide-react"],
+        },
+      },
+    },
   },
 });

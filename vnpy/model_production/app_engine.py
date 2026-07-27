@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import RLock
+from time import monotonic_ns
 
 from vnpy.event import EventEngine
 from vnpy.trader.engine import BaseEngine, MainEngine
@@ -18,7 +19,12 @@ from .engine import AuthoritativeDecisionEngine
 from .execution import BrokerSimulationExecutor
 from .reconciliation import BrokerOutcome, BrokerQueryResult, ReconciliationManager
 from .risk import AuthoritativeRiskContext, ModelIntent, RiskDecision
-from .safety import HardSafetyController, HardSafetySnapshot
+from .safety import (
+    BrokerSimulationContainment,
+    ContainmentReceipt,
+    HardSafetyController,
+    HardSafetySnapshot,
+)
 
 
 APP_NAME = "ModelProduction"
@@ -56,6 +62,7 @@ class BrokerSimulationCoordinator:
         executor: BrokerSimulationExecutor,
         reconciliation: ReconciliationManager,
         safety: HardSafetyController,
+        containment: BrokerSimulationContainment | None = None,
     ) -> None:
         if not campaign_id or not run_id:
             raise ValueError("BROKER_SIMULATION_RUN_IDENTITY_REQUIRED")
@@ -67,6 +74,8 @@ class BrokerSimulationCoordinator:
         self._executor = executor
         self._reconciliation = reconciliation
         self._safety = safety
+        self._containment = containment
+        self._last_containment_receipt: ContainmentReceipt | None = None
         self._lock = RLock()
 
     def submit_intent(
@@ -133,7 +142,32 @@ class BrokerSimulationCoordinator:
 
     def pause(self, *, now_ms: int) -> BrokerSimulationCampaign:
         with self._lock:
-            return self._authority.pause_campaign(self.campaign_id, now_ms=now_ms)
+            campaign = self._authority.pause_campaign(self.campaign_id, now_ms=now_ms)
+            if self._containment is not None:
+                self._last_containment_receipt = self._containment.contain(
+                    action="pause",
+                    campaign_id=self.campaign_id,
+                    detected_at_ns=monotonic_ns(),
+                )
+            return campaign
+
+    def pause_with_receipt(
+        self,
+        *,
+        now_ms: int,
+        detected_at_ns: int,
+    ) -> tuple[BrokerSimulationCampaign, ContainmentReceipt]:
+        if self._containment is None:
+            raise RuntimeError("CONTAINMENT_NOT_CONFIGURED")
+        with self._lock:
+            campaign = self._authority.pause_campaign(self.campaign_id, now_ms=now_ms)
+            receipt = self._containment.contain(
+                action="pause",
+                campaign_id=self.campaign_id,
+                detected_at_ns=detected_at_ns,
+            )
+            self._last_containment_receipt = receipt
+            return campaign, receipt
 
     def emergency_stop(
         self,
@@ -144,8 +178,42 @@ class BrokerSimulationCoordinator:
         now_ms: int,
     ) -> BrokerSimulationCampaign:
         with self._lock:
-            self._safety.activate(reason_code, "critical", evidence_digest, now_ns)
-            return self._authority.stop_campaign(self.campaign_id, now_ms=now_ms)
+            safety = self._safety.activate(reason_code, "critical", evidence_digest, now_ns)
+            campaign = self._authority.stop_campaign(self.campaign_id, now_ms=now_ms)
+            if self._containment is not None:
+                self._last_containment_receipt = self._containment.contain(
+                    action="emergency_stop",
+                    campaign_id=self.campaign_id,
+                    detected_at_ns=now_ns,
+                    exposure_blocked_at_ns=safety.activated_at_ns,
+                )
+            return campaign
+
+    def emergency_stop_with_receipt(
+        self,
+        *,
+        reason_code: str,
+        evidence_digest: str,
+        detected_at_ns: int,
+        now_ns: int,
+        now_ms: int,
+    ) -> tuple[BrokerSimulationCampaign, ContainmentReceipt]:
+        if self._containment is None:
+            raise RuntimeError("CONTAINMENT_NOT_CONFIGURED")
+        with self._lock:
+            safety = self._safety.activate(reason_code, "critical", evidence_digest, now_ns)
+            campaign = self._authority.stop_campaign(self.campaign_id, now_ms=now_ms)
+            receipt = self._containment.contain(
+                action="emergency_stop",
+                campaign_id=self.campaign_id,
+                detected_at_ns=detected_at_ns,
+                exposure_blocked_at_ns=safety.activated_at_ns,
+            )
+            self._last_containment_receipt = receipt
+            return campaign, receipt
+
+    def last_containment_receipt(self) -> ContainmentReceipt | None:
+        return self._last_containment_receipt
 
     def safety_snapshot(self) -> HardSafetySnapshot:
         return self._safety.snapshot()
