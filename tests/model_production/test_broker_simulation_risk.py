@@ -85,6 +85,7 @@ def test_10_1_point25_and_5_per_second_1000_per_session_limits_fail_closed(
 ) -> None:
     assert reason in RiskEvaluator().evaluate(changed_intent, changed_context).reason_codes
 
+
 @pytest.mark.parametrize(
     ("changed_intent", "changed_context", "reason"),
     [
@@ -102,4 +103,3 @@ def test_a_share_cash_t1_lot_price_and_freshness_rules_remain_authoritative(
     reason: str,
 ) -> None:
     assert reason in RiskEvaluator().evaluate(changed_intent, changed_context).reason_codes
-
