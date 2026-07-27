@@ -116,3 +116,28 @@ def test_partial_fill_reconnect_uses_original_operation_and_query_only_recovery(
     assert result.order_id == "XTP.order-partial"
     assert result.reconciliation_revision == 3
     assert restarted.can_dispatch("operation-partial") is False
+
+
+def test_restart_after_durable_dispatch_blocks_new_exposure_until_query_recovery(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "dispatch-crash.sqlite"
+    manager = ReconciliationManager(database)
+    manager.record_dispatch("effect-dispatched", "operation-dispatched")
+
+    restarted = ReconciliationManager(database)
+    assert restarted.new_exposure_blocked
+    assert restarted.can_dispatch("operation-new") is False
+
+    result = restarted.recover_uncertain(
+        "effect-dispatched",
+        lambda operation_key, order_id: BrokerQueryResult(
+            "rejected",
+            "XTP.rejected-operation",
+            1,
+        ),
+    )
+    assert result.operation_key == "operation-dispatched"
+    assert result.state == "rejected"
+    assert restarted.new_exposure_blocked is False
+    assert restarted.can_dispatch("operation-new") is True
