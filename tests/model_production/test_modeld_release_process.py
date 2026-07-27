@@ -450,18 +450,21 @@ def test_release_modeld_round_trip_keeps_broker_authority_in_vnpy(tmp_path: Path
             )
         )
         deadline = monotonic() + 5
-        while not main_engine.calls and monotonic() < deadline:
+        snapshot = loop.snapshot()
+        while (
+            not main_engine.calls or snapshot.broker_submission_count != 1
+        ) and monotonic() < deadline:
             exit_code = process.poll()
             assert exit_code is None, (
                 process.stderr.read() if process.stderr is not None else f"modeld exited {exit_code}"
             )
             sleep(0.01)
+            snapshot = loop.snapshot()
 
         assert len(main_engine.calls) == 1
         request, gateway = main_engine.calls[0]
         assert gateway == "XTP"
         assert request.reference.startswith("model:intent-")
-        snapshot = loop.snapshot()
         assert snapshot.broker_submission_count == 1
         assert snapshot.agent_calls == 0
         assert snapshot.provider_calls == 0
