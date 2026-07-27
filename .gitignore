@@ -8,6 +8,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-demo/
 venv/
 .env*
 
@@ -30,6 +31,12 @@ dist
 # VeighNa
 .vntrader
 .agent-state/
+.demo-state/
+.demo-secrets/
+web/demo-ui/node_modules/
+web/demo-ui/playwright-report/
+web/demo-ui/test-results/
+web/demo-ui/coverage/
 
 # Visual Studio intermediate files
 *.exp
