@@ -131,7 +131,7 @@ def test_tikhub_and_generic_mcp_have_independent_revisions_errors_and_controls()
     console = AgentConsoleEngine()
     console.apply(AgentEvent("mcp.health", {"revision": 7, "status": "blocked", "implicit_context": False, "error": {"code": "MCP_UPSTREAM", "message": "blocked"}}))
     state = console.apply(AgentEvent("tikhub.health", {
-        "revision": 3, "state": "degraded", "route_mode": "required_socks5h",
+        "revision": 3, "state": "degraded", "route_mode": "direct_https",
         "checked_at_ms": 1, "latency_ms": 5, "provider_request_id": None,
         "error_code": "UPSTREAM_UNAVAILABLE",
     }))

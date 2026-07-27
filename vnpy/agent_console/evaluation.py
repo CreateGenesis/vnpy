@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from time import time_ns
 from typing import Any
 
-from vnpy.agent_bridge.events import LiveValidationEvent
+from vnpy.agent_bridge.events import LiveValidationEvent, Socks5hToolEvent
 
 from .models import LiveValidationTypedPage
 
@@ -354,4 +354,51 @@ class LiveValidationViewState:
             "last_error": self.last_error,
             "authority": "research_only",
             "provider_calls": 0,
+        }
+
+
+@dataclass(frozen=True)
+class Socks5hToolViewState:
+    """Separate read-only console projection for bounded SOCKS5H research."""
+
+    revision: int = 0
+    source_revisions: dict[str, int] = field(default_factory=dict)
+    views: dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_error: str | None = None
+
+    def apply(self, value: bytes | str | dict[str, Any] | Socks5hToolEvent) -> "Socks5hToolViewState":
+        event = value if isinstance(value, Socks5hToolEvent) else Socks5hToolEvent.decode(value)
+        current = self.source_revisions.get(event.page_key, 0)
+        if event.revision <= current:
+            return replace(self, last_error="STALE_REVISION")
+        revisions = dict(self.source_revisions)
+        revisions[event.page_key] = event.revision
+        views = dict(self.views)
+        views[event.event_type.removeprefix("socks5h_tool.")] = {
+            "mission_id": event.mission_id,
+            "task_id": event.task_id,
+            "invocation_id": event.invocation_id,
+            "revision": event.revision,
+            **event.payload,
+        }
+        return replace(
+            self,
+            revision=self.revision + 1,
+            source_revisions=revisions,
+            views=views,
+            last_error=None,
+        )
+
+    def console_payload(self) -> dict[str, Any]:
+        return {
+            "revision": self.revision,
+            "views": {
+                kind: self.views.get(kind, {})
+                for kind in ("grant", "invocation", "route_evidence", "result", "failure", "budget")
+            },
+            "last_error": self.last_error,
+            "authority": "research_only",
+            "invocation_controls": False,
+            "provider_calls": 0,
+            "tikhub_route_mutations": 0,
         }

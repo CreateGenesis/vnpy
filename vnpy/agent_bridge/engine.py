@@ -16,6 +16,8 @@ from .events import (
     LiveValidationAck,
     LiveValidationContractError,
     LiveValidationEvent,
+    Socks5hToolAck,
+    Socks5hToolEvent,
 )
 from .mmap_ring import MmapRing, RingFull
 
@@ -55,6 +57,11 @@ class AgentBridgeEngine:
         self._live_ack_leases: set[str] = set()
         self._live_listeners: list[Callable[[LiveValidationEvent, LiveValidationAck], None]] = []
         self._load_live_validation_state()
+        self._socks_store_path = self.root / "socks5h-tool-projection-v1.json"
+        self._socks_state = {"contract_version": 1, "events": {}, "acks": {}}
+        self._socks_ack_queue: deque[str] = deque()
+        self._socks_ack_leases: set[str] = set()
+        self._load_socks5h_state()
 
     def publish_observation(self, event: AgentEvent) -> int:
         with self._state_lock:
@@ -360,6 +367,104 @@ class AgentBridgeEngine:
             self._live_state = self._empty_live_state()
             self._load_live_validation_state()
             return deepcopy(self._live_state)
+
+    def _load_socks5h_state(self) -> None:
+        if self._socks_store_path.exists():
+            try:
+                value = json.loads(self._socks_store_path.read_text(encoding="utf-8"))
+                if not isinstance(value, dict) or set(value) != {"contract_version", "events", "acks"} or value["contract_version"] != 1:
+                    raise ValueError("invalid SOCKS5H projection store")
+                for event in value["events"].values():
+                    Socks5hToolEvent.decode(event)
+                for record in value["acks"].values():
+                    Socks5hToolAck.decode(record["ack"])
+                self._socks_state = value
+            except (OSError, ValueError, json.JSONDecodeError, TypeError):
+                self._health = BridgeHealth.RECOVERING
+                self._last_error = "SOCKS5H_STORE_RECOVERY"
+        self._socks_ack_queue = deque(
+            event_id
+            for event_id, record in self._socks_state["acks"].items()
+            if not record["delivered"]
+        )
+
+    def _persist_socks5h_state(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        temporary = self._socks_store_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(self._socks_state, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(self._socks_store_path)
+
+    def apply_socks5h_tool_event(
+        self,
+        value: bytes | str | dict[str, Any] | Socks5hToolEvent,
+        *,
+        received_at_ms: int | None = None,
+    ) -> Socks5hToolAck:
+        event = value if isinstance(value, Socks5hToolEvent) else Socks5hToolEvent.decode(value)
+        received = max(1, received_at_ms if received_at_ms is not None else time_ns() // 1_000_000)
+        with self._state_lock:
+            existing_ack = self._socks_state["acks"].get(event.event_id)
+            if existing_ack is not None:
+                return Socks5hToolAck.decode(existing_ack["ack"])
+            current_value = self._socks_state["events"].get(event.page_key)
+            status = "applied"
+            error_code = None
+            if current_value is not None:
+                current = Socks5hToolEvent.decode(current_value)
+                if event.revision < current.revision:
+                    status, error_code = "stale_rejected", "STALE_REVISION"
+                elif event.revision == current.revision:
+                    status = "duplicate" if event.payload_digest == current.payload_digest else "invalid_rejected"
+                    error_code = None if status == "duplicate" else "REVISION_COLLISION"
+            if status == "applied":
+                self._socks_state["events"][event.page_key] = asdict(event)
+                self._revision += 1
+            ack = Socks5hToolAck.create(
+                event,
+                status=status,
+                error_code=error_code,
+                received_at_ms=received,
+            )
+            self._socks_state["acks"][event.event_id] = {"ack": asdict(ack), "delivered": False}
+            self._persist_socks5h_state()
+            self._socks_ack_queue.append(event.event_id)
+            return ack
+
+    def next_socks5h_tool_ack(self) -> Socks5hToolAck | None:
+        with self._state_lock:
+            while self._socks_ack_queue:
+                event_id = self._socks_ack_queue.popleft()
+                record = self._socks_state["acks"].get(event_id)
+                if record is None or record["delivered"] or event_id in self._socks_ack_leases:
+                    continue
+                self._socks_ack_leases.add(event_id)
+                return Socks5hToolAck.decode(record["ack"])
+            return None
+
+    def confirm_socks5h_tool_ack(self, event_id: str, payload_digest: str) -> None:
+        with self._state_lock:
+            record = self._socks_state["acks"].get(event_id)
+            if record is None:
+                raise KeyError(event_id)
+            ack = Socks5hToolAck.decode(record["ack"])
+            if ack.payload_digest != payload_digest or event_id not in self._socks_ack_leases:
+                raise LiveValidationContractError("ACK_IDENTITY_MISMATCH", "invalid SOCKS5H ACK confirmation")
+            record["delivered"] = True
+            self._socks_ack_leases.discard(event_id)
+            self._persist_socks5h_state()
+
+    def socks5h_tool_snapshot(self) -> dict[str, Any]:
+        with self._state_lock:
+            return deepcopy(self._socks_state)
+
+    def recover_socks5h_tool(self) -> dict[str, Any]:
+        with self._state_lock:
+            self._socks_state = {"contract_version": 1, "events": {}, "acks": {}}
+            self._load_socks5h_state()
+            return deepcopy(self._socks_state)
 
     def snapshot(self) -> BridgeSnapshot:
         return BridgeSnapshot(self._health, self.critical.depth(), self.routine.depth(), self._revision, self._last_error)

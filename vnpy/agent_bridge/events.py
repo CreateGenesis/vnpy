@@ -411,3 +411,171 @@ class LiveValidationAck:
         if ack.error_code is not None and not _LIVE_ERROR.fullmatch(ack.error_code):
             raise LiveValidationContractError("MALFORMED_ACK", "invalid ACK error")
         return ack
+
+
+SOCKS5H_TOOL_EVENT_TYPES = frozenset(
+    {
+        "socks5h_tool.grant",
+        "socks5h_tool.invocation",
+        "socks5h_tool.route_evidence",
+        "socks5h_tool.result",
+        "socks5h_tool.failure",
+        "socks5h_tool.budget",
+    }
+)
+_SOCKS5H_EVENT_FIELDS = {
+    "contract_version",
+    "entity_type",
+    "event_id",
+    "event_type",
+    "mission_id",
+    "task_id",
+    "invocation_id",
+    "producer_id",
+    "revision",
+    "payload",
+    "payload_digest",
+}
+_SOCKS5H_PAYLOAD_FIELDS = {
+    "state",
+    "certainty",
+    "freshness",
+    "evidence_refs",
+    "permitted_next_actions",
+}
+
+
+@dataclass(frozen=True)
+class Socks5hToolEvent:
+    """Strict, credential-free projection event for the standalone network tool."""
+
+    contract_version: int
+    entity_type: str
+    event_id: str
+    event_type: str
+    mission_id: str
+    task_id: str
+    invocation_id: str
+    producer_id: str
+    revision: int
+    payload: dict[str, Any]
+    payload_digest: str
+
+    @property
+    def page_key(self) -> str:
+        return f"{self.mission_id}:{self.task_id}:{self.invocation_id}:{self.event_type}"
+
+    def encode(self) -> bytes:
+        return _canonical_live_json(asdict(self))
+
+    @classmethod
+    def decode(cls, data: bytes | str | dict[str, Any]) -> "Socks5hToolEvent":
+        if isinstance(data, dict):
+            value = data
+        else:
+            try:
+                value = json.loads(data, object_pairs_hook=_strict_json_object)
+            except LiveValidationContractError:
+                raise
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", str(error)) from error
+        if not isinstance(value, dict) or set(value) != _SOCKS5H_EVENT_FIELDS:
+            raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", "invalid event fields")
+        if value["contract_version"] != 1 or value["entity_type"] != "socks5h_tool_event":
+            raise LiveValidationContractError("INCOMPATIBLE_CONTRACT", "unsupported SOCKS5H event")
+        if value["event_type"] not in SOCKS5H_TOOL_EVENT_TYPES:
+            raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", "unknown event type")
+        for key in ("event_id", "mission_id", "task_id", "invocation_id", "producer_id"):
+            if not isinstance(value[key], str) or not _LIVE_ID.fullmatch(value[key]):
+                raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", f"invalid {key}")
+        if not isinstance(value["revision"], int) or isinstance(value["revision"], bool) or value["revision"] <= 0:
+            raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", "invalid revision")
+        payload = value["payload"]
+        if not isinstance(payload, dict) or set(payload) != _SOCKS5H_PAYLOAD_FIELDS:
+            raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", "invalid payload fields")
+        if (
+            not isinstance(payload["state"], str)
+            or len(payload["state"]) > 32
+            or payload["certainty"] not in {"certain", "partial", "uncertain", "unknown"}
+            or payload["freshness"] not in {"fresh", "stale", "expired", "unavailable"}
+            or not _bounded_unique_strings(payload["evidence_refs"], maximum=32, pattern=_LIVE_DIGEST)
+            or not _bounded_unique_strings(payload["permitted_next_actions"], maximum=8, pattern=_LIVE_ACTION)
+        ):
+            raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", "invalid payload")
+        claimed = value["payload_digest"]
+        if not isinstance(claimed, str) or not _LIVE_DIGEST.fullmatch(claimed):
+            raise LiveValidationContractError("MALFORMED_SOCKS5H_EVENT", "invalid payload digest")
+        expected = compute_live_validation_payload_digest(payload, claimed.split(":", 1)[0])
+        if claimed != expected:
+            raise LiveValidationContractError("DIGEST_MISMATCH", "SOCKS5H payload digest mismatch")
+        return cls(**deepcopy(value))
+
+
+@dataclass(frozen=True)
+class Socks5hToolAck:
+    contract_version: int
+    entity_type: str
+    consumer: str
+    event_id: str
+    mission_id: str
+    task_id: str
+    invocation_id: str
+    revision: int
+    payload_digest: str
+    status: str
+    error_code: str | None
+    received_at_ms: int
+    authority: str = "research_only"
+    provider_calls: int = 0
+    tikhub_route_mutations: int = 0
+
+    @classmethod
+    def create(
+        cls,
+        event: Socks5hToolEvent,
+        *,
+        status: str,
+        error_code: str | None,
+        received_at_ms: int,
+    ) -> "Socks5hToolAck":
+        if status not in {"applied", "duplicate", "stale_rejected", "invalid_rejected"}:
+            raise LiveValidationContractError("MALFORMED_ACK", "invalid SOCKS5H ACK status")
+        if error_code is not None and not _LIVE_ERROR.fullmatch(error_code):
+            raise LiveValidationContractError("MALFORMED_ACK", "invalid SOCKS5H ACK error")
+        return cls(
+            contract_version=1,
+            entity_type="socks5h_tool_consumer_ack",
+            consumer="vnpy",
+            event_id=event.event_id,
+            mission_id=event.mission_id,
+            task_id=event.task_id,
+            invocation_id=event.invocation_id,
+            revision=event.revision,
+            payload_digest=event.payload_digest,
+            status=status,
+            error_code=error_code,
+            received_at_ms=max(1, received_at_ms),
+        )
+
+    @classmethod
+    def decode(cls, data: bytes | str | dict[str, Any]) -> "Socks5hToolAck":
+        value = data if isinstance(data, dict) else json.loads(data, object_pairs_hook=_strict_json_object)
+        ack = cls(**deepcopy(value))
+        if (
+            ack.contract_version != 1
+            or ack.entity_type != "socks5h_tool_consumer_ack"
+            or ack.consumer != "vnpy"
+            or ack.authority != "research_only"
+            or ack.provider_calls != 0
+            or ack.tikhub_route_mutations != 0
+            or ack.status not in {"applied", "duplicate", "stale_rejected", "invalid_rejected"}
+            or not all(_LIVE_ID.fullmatch(item) for item in (ack.event_id, ack.mission_id, ack.task_id, ack.invocation_id))
+            or not _LIVE_DIGEST.fullmatch(ack.payload_digest)
+            or ack.revision <= 0
+            or ack.received_at_ms <= 0
+        ):
+            raise LiveValidationContractError("MALFORMED_ACK", "invalid SOCKS5H ACK")
+        return ack
+
+    def encode(self) -> bytes:
+        return _canonical_live_json(asdict(self))
