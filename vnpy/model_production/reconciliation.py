@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 from threading import RLock
+from collections.abc import Callable
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,13 @@ class BrokerOutcome:
     state: str
     order_id: str | None = None
     reconciliation_revision: int = 0
+
+
+@dataclass(frozen=True)
+class BrokerQueryResult:
+    state: str
+    order_id: str | None
+    reconciliation_revision: int
 
 
 class ReconciliationManager:
@@ -59,12 +67,24 @@ class ReconciliationManager:
             self._outcomes[effect_id] = outcome
             self._persist(outcome)
 
-    def record_outcome(self, effect_id: str, state: str) -> None:
+    def record_outcome(
+        self,
+        effect_id: str,
+        state: str,
+        order_id: str | None = None,
+        reconciliation_revision: int = 0,
+    ) -> None:
         if state not in {"accepted", "rejected", "unknown", "partial", "cancelled", "cancel_rejected"}:
             raise ValueError("invalid broker outcome")
         with self._lock:
             current = self._outcomes[effect_id]
-            outcome = BrokerOutcome(effect_id, current.operation_key, state)
+            outcome = BrokerOutcome(
+                effect_id,
+                current.operation_key,
+                state,
+                order_id if order_id is not None else current.order_id,
+                reconciliation_revision or current.reconciliation_revision,
+            )
             self._outcomes[effect_id] = outcome
             self._persist(outcome)
 
@@ -101,6 +121,49 @@ class ReconciliationManager:
     def can_dispatch(self, operation_key: str) -> bool:
         with self._lock:
             return operation_key not in self._operations and not self.new_exposure_blocked
+
+    def outcome(self, effect_id: str) -> BrokerOutcome:
+        with self._lock:
+            try:
+                return self._outcomes[effect_id]
+            except KeyError as exc:
+                raise KeyError("BROKER_EFFECT_NOT_FOUND") from exc
+
+    def outcome_for_operation(self, operation_key: str) -> BrokerOutcome | None:
+        with self._lock:
+            effect_id = self._operations.get(operation_key)
+            return self._outcomes.get(effect_id) if effect_id is not None else None
+
+    def recover_uncertain(
+        self,
+        effect_id: str,
+        query: Callable[[str, str | None], BrokerQueryResult | None],
+    ) -> BrokerOutcome:
+        """Query the original broker operation without creating a replacement order."""
+
+        with self._lock:
+            current = self.outcome(effect_id)
+            if current.state not in {"dispatched", "unknown", "partial"}:
+                return current
+            result = query(current.operation_key, current.order_id)
+            if result is None:
+                return current
+            if result.state not in {"accepted", "rejected", "partial", "cancelled"}:
+                raise ValueError("invalid broker query result")
+            if result.reconciliation_revision <= current.reconciliation_revision:
+                raise ValueError("stale reconciliation revision")
+            if result.state in {"accepted", "rejected"} and not result.order_id:
+                raise ValueError("reconciled broker order identity required")
+            recovered = BrokerOutcome(
+                effect_id=current.effect_id,
+                operation_key=current.operation_key,
+                state=result.state,
+                order_id=result.order_id or current.order_id,
+                reconciliation_revision=result.reconciliation_revision,
+            )
+            self._outcomes[effect_id] = recovered
+            self._persist(recovered)
+            return recovered
 
     def reconcile(self, effect_id: str, state: str, order_id: str, revision: int) -> None:
         if state not in {"accepted", "rejected"} or revision <= 0:
