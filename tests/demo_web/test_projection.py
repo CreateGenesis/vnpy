@@ -86,6 +86,7 @@ def projection_input(source_revision: int = 7) -> DemoProjectionInput:
             package_digest=digest("package"),
             readiness="ready",
         ),
+        campaign_id="b53bc59c-c626-4f16-8a3e-a3185c7dad23",
         campaign_digest=digest("current-campaign"),
         campaign_state="active",
         current_gateways=(gateway("XTP", 3_200), gateway("TORA", 2_800)),
@@ -106,6 +107,7 @@ def test_projection_keeps_current_and_historical_simulation_values_distinct(
 
     assert public["performance_scope"] == "broker_simulation"
     assert public["current"]["label"] == "current_broker_simulation"
+    assert public["current"]["campaign_id"] == "b53bc59c-c626-4f16-8a3e-a3185c7dad23"
     assert public["history"][0]["label"] == "historical_broker_simulation_evidence"
     assert public["current"]["gateways"][0]["net_profit_minor"] == 3_200
     assert public["history"][0]["gateways"][0]["net_profit_minor"] == 10_000
