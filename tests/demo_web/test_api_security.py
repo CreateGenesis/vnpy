@@ -237,7 +237,11 @@ def test_per_run_client_is_loopback_bound_and_has_no_generic_or_trading_methods(
     )
 
     receipt = client.read_status()
-    client.prepare_campaign(digest("campaign"), digest("candidate"), "request-00000001")
+    campaign_id = "b53bc59c-c626-4f16-8a3e-a3185c7dad23"
+    client.prepare_campaign(
+        campaign_id, digest("campaign"), digest("candidate"), "request-00000001"
+    )
+    client.start_campaign(campaign_id, digest("campaign"), "request-00000004")
     client.pause_campaign(digest("campaign"), "request-00000002")
     client.emergency_stop("request-00000003")
 
@@ -245,6 +249,7 @@ def test_per_run_client_is_loopback_bound_and_has_no_generic_or_trading_methods(
     assert {call[1] for call in transport.calls} == {
         "run.status.v1",
         "run.prepare_campaign.v1",
+        "run.start_campaign.v1",
         "run.pause_campaign.v1",
         "run.emergency_stop.v1",
     }

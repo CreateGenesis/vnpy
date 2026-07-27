@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, Protocol
 from urllib.parse import urlsplit
+from uuid import UUID
 
 
 _DIGEST = re.compile(r"^(?:sha256|blake3):[0-9a-f]{64}$")
@@ -103,18 +104,39 @@ class BrokerSimulationRunClient:
 
     def prepare_campaign(
         self,
+        campaign_id: str,
         campaign_digest: str,
         candidate_digest: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        _require_uuid(campaign_id)
         _require_digest(campaign_digest, "RUN_CLIENT_CAMPAIGN_INVALID")
         _require_digest(candidate_digest, "RUN_CLIENT_CANDIDATE_INVALID")
         _require_idempotency_key(idempotency_key)
         return self._send(
             "run.prepare_campaign.v1",
             {
+                "campaign_id": campaign_id,
                 "campaign_digest": campaign_digest,
                 "candidate_digest": candidate_digest,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    def start_campaign(
+        self,
+        campaign_id: str,
+        campaign_digest: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        _require_uuid(campaign_id)
+        _require_digest(campaign_digest, "RUN_CLIENT_CAMPAIGN_INVALID")
+        _require_idempotency_key(idempotency_key)
+        return self._send(
+            "run.start_campaign.v1",
+            {
+                "campaign_id": campaign_id,
+                "campaign_digest": campaign_digest,
                 "idempotency_key": idempotency_key,
             },
         )
@@ -179,6 +201,13 @@ def _require_digest(value: str, code: str) -> None:
 def _require_idempotency_key(value: str) -> None:
     if not isinstance(value, str) or not 16 <= len(value) <= 128:
         raise ValueError("RUN_CLIENT_IDEMPOTENCY_KEY_INVALID")
+
+
+def _require_uuid(value: str) -> None:
+    try:
+        UUID(value)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError("RUN_CLIENT_CAMPAIGN_ID_INVALID") from exc
 
 
 def _assert_no_forbidden_response(value: Any) -> None:

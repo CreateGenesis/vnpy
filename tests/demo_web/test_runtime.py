@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import struct
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 from threading import Thread
@@ -10,7 +11,12 @@ from typing import Any
 
 import pytest
 
-from vnpy.demo_web.runtime import build_demo_runtime
+from vnpy.demo_web.run_clients import BrokerSimulationRunClient, RunClientBinding
+from vnpy.demo_web.runtime import (
+    ConcreteDemoBackend,
+    DemoCandidate,
+    build_demo_runtime,
+)
 from vnpy.demo_web.transport import LengthPrefixedJsonTransport
 
 
@@ -55,7 +61,7 @@ def test_runtime_rejects_malformed_candidate_and_non_loopback_descriptors(
         "package_digest": digest("package"),
         "configuration_digest": digest("configuration"),
         "policy_digest": digest("policy"),
-        "symbols": ["600000.SSE"],
+        "symbols": ["600000.SH"],
         "calendar_sessions": [
             "2026-07-27",
             "2026-07-28",
@@ -130,6 +136,132 @@ def test_transport_rejects_http_and_remote_endpoints() -> None:
         transport.request("http://127.0.0.1:17801", "health", {})
     with pytest.raises(ValueError, match="IPC_LOOPBACK_REQUIRED"):
         transport.request("tcp://192.0.2.1:17801", "health", {})
+
+
+def test_concrete_backend_starts_replays_and_pauses_isolated_runs(tmp_path: Path) -> None:
+    transport = RecordingRunTransport()
+    clients = {
+        gateway: BrokerSimulationRunClient(
+            RunClientBinding(
+                gateway,
+                digest(f"run:{gateway}"),
+                f"tcp://127.0.0.1:{17801 if gateway == 'XTP' else 17802}",
+            ),
+            transport,
+        )
+        for gateway in ("XTP", "TORA")
+    }
+    candidate = DemoCandidate(
+        ready=True,
+        candidate_digest=digest("candidate"),
+        author_lineage_digest=digest("author"),
+        package_digest=digest("package"),
+        configuration_digest=digest("configuration"),
+        policy_digest=digest("policy"),
+        symbols=("600000.SH",),
+        calendar_sessions=tuple(date(2026, 7, day) for day in range(27, 32)),
+        lifecycle_revision=1,
+    )
+    backend = ConcreteDemoBackend(tmp_path, candidate, clients, guidance_available=True)
+    command = {
+        "candidate_digest": candidate.candidate_digest,
+        "gateways": ["XTP", "TORA"],
+        "idempotency_key": "campaign-request-0001",
+    }
+
+    assert backend.readiness()["ready"] is True
+    first = backend.start_campaign(command)
+    replay = backend.start_campaign(command)
+
+    assert first == replay
+    assert first["state"] == "active"
+    assert [call[1] for call in transport.calls].count("run.prepare_campaign.v1") == 2
+    assert [call[1] for call in transport.calls].count("run.start_campaign.v1") == 2
+    projection = backend.projection()
+    assert projection["current"]["campaign_id"] == first["campaign_id"]
+    assert projection["current"]["campaign_state"] == "active"
+    paused = backend.pause_campaign(first["campaign_id"])
+    assert paused["state"] == "paused"
+    assert backend.projection()["current"]["campaign_state"] == "paused"
+
+
+def test_concrete_backend_contains_every_run_when_start_is_blocked(tmp_path: Path) -> None:
+    transport = RecordingRunTransport(blocked_start_gateway="TORA")
+    clients = {
+        gateway: BrokerSimulationRunClient(
+            RunClientBinding(
+                gateway,
+                digest(f"run:{gateway}"),
+                f"tcp://127.0.0.1:{17801 if gateway == 'XTP' else 17802}",
+            ),
+            transport,
+        )
+        for gateway in ("XTP", "TORA")
+    }
+    candidate = DemoCandidate(
+        ready=True,
+        candidate_digest=digest("candidate"),
+        author_lineage_digest=digest("author"),
+        package_digest=digest("package"),
+        configuration_digest=digest("configuration"),
+        policy_digest=digest("policy"),
+        symbols=("600000.SH",),
+        calendar_sessions=tuple(date(2026, 7, day) for day in range(27, 32)),
+        lifecycle_revision=1,
+    )
+    backend = ConcreteDemoBackend(tmp_path, candidate, clients, guidance_available=True)
+
+    result = backend.start_campaign(
+        {
+            "candidate_digest": candidate.candidate_digest,
+            "gateways": ["XTP", "TORA"],
+            "idempotency_key": "campaign-request-failed-0001",
+        }
+    )
+
+    assert result["state"] == "stopped"
+    operations = [call[1] for call in transport.calls]
+    assert operations.count("run.emergency_stop.v1") == 2
+    assert backend.projection()["current"]["campaign_state"] == "stopped"
+
+
+class RecordingRunTransport:
+    def __init__(self, blocked_start_gateway: str | None = None) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.blocked_start_gateway = blocked_start_gateway
+
+    def request(
+        self, endpoint: str, operation: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.calls.append((endpoint, operation, payload))
+        states = {
+            "run.status.v1": "ready",
+            "run.prepare_campaign.v1": "prepared",
+            "run.start_campaign.v1": "active",
+            "run.pause_campaign.v1": "paused",
+            "run.emergency_stop.v1": "contained",
+        }
+        state = states[operation]
+        if (
+            operation == "run.start_campaign.v1"
+            and payload["gateway"] == self.blocked_start_gateway
+        ):
+            state = "blocked"
+        return {
+            "contract_version": 1,
+            "gateway": payload["gateway"],
+            "run_digest": payload["run_digest"],
+            "operation": operation,
+            "state": state,
+            "receipt_digest": digest(f"{operation}:{payload['gateway']}"),
+            "data": {
+                "connection_state": "connected",
+                "reconciliation_state": "complete",
+                "positions": [],
+                "incidents": [],
+                "permitted_next_action": "pause",
+            },
+        }
 
 
 def _read_exact(connection: socket.socket, size: int) -> bytes:
