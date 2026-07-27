@@ -25,6 +25,7 @@ const projection: DemoProjection = {
   },
   current: {
     label: "current_broker_simulation",
+    campaign_id: "b53bc59c-c626-4f16-8a3e-a3185c7dad23",
     campaign_digest: digest("d"),
     campaign_state: "active",
     gateways: [
@@ -196,9 +197,9 @@ test("offers only campaign, pause, and emergency controls", async () => {
   await screen.findByText("Current broker simulation");
 
   fireEvent.click(screen.getByRole("button", { name: "Pause campaign" }));
-  fireEvent.click(screen.getByRole("button", { name: "Emergency stop" }));
-
   await waitFor(() => expect(mock.api.pauseCampaign).toHaveBeenCalledOnce());
-  expect(mock.api.emergencyStop).toHaveBeenCalledOnce();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Emergency stop" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Emergency stop" }));
+  await waitFor(() => expect(mock.api.emergencyStop).toHaveBeenCalledOnce());
   expect(screen.queryByRole("button", { name: /order|cancel/i })).not.toBeInTheDocument();
 });
