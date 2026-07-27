@@ -32,6 +32,10 @@ class FakeNativeBridge:
         self.calls.append(("replay",))
         return 2
 
+    def replay_model_input_pending(self) -> int:
+        self.calls.append(("replay_inputs",))
+        return 1
+
     def model_input_recovery_complete(self, correlation_id: str, event_time_ms: int) -> int:
         self.calls.append(("input_recovery", correlation_id, event_time_ms))
         return 8
@@ -131,6 +135,7 @@ def test_replay_recovery_and_canonical_publication_delegate_to_native_bridge() -
     native = FakeNativeBridge()
     bridge = NativeModelBridge(native=native)
     assert bridge.replay_pending() == 2
+    assert bridge.replay_input_pending() == 1
     assert bridge.publish_input_recovery_complete("corr", 100) == 8
     assert bridge.publish_decision_recovery_complete("corr", 101) == 9
     assert (

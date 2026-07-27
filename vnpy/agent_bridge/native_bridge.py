@@ -43,6 +43,8 @@ class _NativeBridge(Protocol):
 
     def replay_model_pending(self) -> int: ...
 
+    def replay_model_input_pending(self) -> int: ...
+
     def model_input_recovery_complete(
         self, correlation_id: str, event_time_ms: int
     ) -> int: ...
@@ -155,6 +157,11 @@ class NativeModelBridge:
         """Publish only journaled frames that are not already mmap-resident."""
 
         return self._native.replay_model_pending()
+
+    def replay_input_pending(self) -> int:
+        """Replay only vn.py-owned model inputs after producer restart."""
+
+        return self._native.replay_model_input_pending()
 
     def publish_input_recovery_complete(
         self, correlation_id: str, event_time_ms: int

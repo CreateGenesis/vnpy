@@ -19,10 +19,17 @@ from uuid import UUID
 from vnpy.event import EventEngine
 from vnpy.trader.engine import MainEngine
 
+from vnpy.agent_bridge.native_bridge import NativeModelBridge
+from vnpy.model_production.app_engine import BrokerSimulationCoordinator
 from vnpy.model_production.broker_simulation import (
     BrokerSimulationAuthority,
     GatewayBinding,
 )
+from vnpy.model_production.broker_simulation_model_loop import BrokerSimulationModelLoop
+from vnpy.model_production.engine import AuthoritativeDecisionEngine
+from vnpy.model_production.execution import BrokerSimulationExecutor
+from vnpy.model_production.journal import ModelProductionJournal
+from vnpy.model_production.reconciliation import ReconciliationManager
 from vnpy.model_production.safety import BrokerSimulationContainment, HardSafetyController
 
 from .runtime import DemoCandidate, _load_candidate, _load_operator_digest, _load_unique_json
@@ -51,6 +58,7 @@ class BrokerSimulationRunHost:
         gateway: str,
         *,
         main_engine: Any | None = None,
+        model_bridge: NativeModelBridge | None = None,
     ) -> None:
         if gateway not in {"XTP", "TORA"}:
             raise ValueError("RUN_GATEWAY_INVALID")
@@ -72,7 +80,8 @@ class BrokerSimulationRunHost:
         run_root = self._root / ".demo-state" / "runs" / gateway
         run_root.mkdir(parents=True, exist_ok=True)
         self._host_state_path = run_root / "host-state.json"
-        self._authority = BrokerSimulationAuthority(run_root / "authority.db")
+        self._database = run_root / "authority.db"
+        self._authority = BrokerSimulationAuthority(self._database)
         self._main_engine = main_engine or _connect_gateway(
             self._root, gateway, self._binding.credential_ref
         )
@@ -82,9 +91,24 @@ class BrokerSimulationRunHost:
             database=run_root / "containment.db",
         )
         self._safety = HardSafetyController()
+        self._reconciliation = ReconciliationManager(self._database)
+        self._journal = ModelProductionJournal(self._database)
+        self._executor = BrokerSimulationExecutor(
+            main_engine=self._main_engine,
+            binding=self._binding,
+            reconciliation=self._reconciliation,
+        )
+        self._model_bridge = model_bridge or NativeModelBridge(run_root / "model-bridge")
+        self._runtime_slot = f"broker-{gateway.lower()}-slot"
+        self._coordinator: BrokerSimulationCoordinator | None = None
+        self._model_loop: BrokerSimulationModelLoop | None = None
+        self._closed = False
         self._operator_identity_digest = _load_operator_digest(
             self._root / ".demo-secrets/operator.json"
         )
+        retained = self._read_host_state()
+        if retained is not None and retained.get("state") == "active":
+            self._ensure_model_loop(str(retained["campaign_id"])).start()
 
     def handle(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         if operation not in _OPERATIONS:
@@ -119,6 +143,7 @@ class BrokerSimulationRunHost:
                 or retained["campaign_digest"] != campaign_digest
             ):
                 raise RuntimeError("campaign drift")
+            self._ensure_model_loop(campaign_id)
             return self._response(operation, retained["state"], {"campaign_id": campaign_id})
         now_ms = _now_ms()
         self._authority.create_campaign(
@@ -145,6 +170,7 @@ class BrokerSimulationRunHost:
                 "updated_at_ms": now_ms,
             }
         )
+        self._ensure_model_loop(campaign_id)
         return self._response(operation, "prepared", {"campaign_id": campaign_id})
 
     def _start(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -154,11 +180,13 @@ class BrokerSimulationRunHost:
         state["state"] = campaign.state
         state["updated_at_ms"] = _now_ms()
         self._write_host_state(state)
+        self._ensure_model_loop(campaign.campaign_id).start()
         return self._response(operation, campaign.state, {"campaign_id": campaign.campaign_id})
 
     def _pause(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         state = self._require_campaign(payload, require_id=False)
         _idempotency(payload.get("idempotency_key"))
+        self._close_model_loop()
         self._authority.pause_campaign(state["campaign_id"], now_ms=_now_ms())
         receipt = self._containment.contain(
             action="pause",
@@ -172,6 +200,7 @@ class BrokerSimulationRunHost:
 
     def _stop(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         _idempotency(payload.get("idempotency_key"))
+        self._close_model_loop()
         state = self._read_host_state()
         detected = monotonic_ns()
         evidence_digest = _digest({"reason": "OPERATOR_EMERGENCY_STOP", "detected": detected})
@@ -206,6 +235,7 @@ class BrokerSimulationRunHost:
 
     def _public_status(self) -> dict[str, Any]:
         state = self._read_host_state()
+        model = self._model_loop.snapshot() if self._model_loop is not None else None
         equity = self._equity_minor()
         starting = state.get("starting_equity_minor") if state else None
         incidents = ["SIGNED_FEE_LEDGER_UNAVAILABLE"]
@@ -257,10 +287,75 @@ class BrokerSimulationRunHost:
             "incidents": incidents,
             "residual_exposure_minor": gross,
             "working_order_count": len(active_orders),
-            "unresolved_outcomes": 0,
+            "unresolved_outcomes": len(self._reconciliation.unresolved_effect_ids()),
             "permitted_next_action": "pause" if state and state["state"] == "active" else "none",
+            "model_state": model.state if model is not None else "inactive",
+            "model_inputs": model.input_count if model is not None else 0,
+            "model_decisions": model.decision_count if model is not None else 0,
+            "agent_calls": model.agent_calls if model is not None else 0,
+            "provider_calls": model.provider_calls if model is not None else 0,
+            "model_last_error": model.last_error if model is not None else None,
             "updated_at_ms": _now_ms(),
         }
+
+    def close(self) -> None:
+        """Release the Tick handler and model decision poller for this run host."""
+
+        if self._closed:
+            return
+        self._close_model_loop()
+        self._containment.close()
+        self._reconciliation.close()
+        self._authority.close()
+        self._closed = True
+
+    def _ensure_model_loop(self, campaign_id: str) -> BrokerSimulationModelLoop:
+        if self._model_loop is not None:
+            if self._coordinator is None or self._coordinator.campaign_id != campaign_id:
+                raise RuntimeError("MODEL_LOOP_CAMPAIGN_DRIFT")
+            return self._model_loop
+        event_engine = getattr(self._main_engine, "event_engine", None)
+        if event_engine is None:
+            raise RuntimeError("MODEL_LOOP_EVENT_ENGINE_UNAVAILABLE")
+        coordinator = BrokerSimulationCoordinator(
+            campaign_id=campaign_id,
+            run_id=f"{campaign_id}:{self.gateway.lower()}",
+            binding=self._binding,
+            authority=self._authority,
+            decision_engine=AuthoritativeDecisionEngine(
+                journal=self._journal,
+                safety=self._safety,
+                expected_producer_id=f"modeld:{self._runtime_slot}",
+                active_package_digest=self._candidate.package_digest,
+                lifecycle_revision=self._candidate.lifecycle_revision,
+                stage="broker_simulation",
+            ),
+            executor=self._executor,
+            reconciliation=self._reconciliation,
+            safety=self._safety,
+            containment=self._containment,
+        )
+        self._coordinator = coordinator
+        self._model_loop = BrokerSimulationModelLoop(
+            bridge=self._model_bridge,
+            coordinator=coordinator,
+            reconciliation=self._reconciliation,
+            event_engine=event_engine,
+            main_engine=self._main_engine,
+            database=self._database,
+            gateway=self.gateway,
+            package_digest=self._candidate.package_digest,
+            configuration_digest=self._candidate.configuration_digest,
+            policy_digest=self._candidate.policy_digest,
+            runtime_slot=self._runtime_slot,
+            lifecycle_revision=self._candidate.lifecycle_revision,
+            symbols=self._candidate.symbols,
+        )
+        return self._model_loop
+
+    def _close_model_loop(self) -> None:
+        if self._model_loop is not None:
+            self._model_loop.close()
 
     def _equity_minor(self) -> int | None:
         balances = [
@@ -367,6 +462,7 @@ class RunIpcServer:
                     connection.sendall(struct.pack(">I", len(encoded)) + encoded)
         finally:
             self._listener.close()
+            self._host.close()
             self.endpoint_path.unlink(missing_ok=True)
 
     def _serve_connection(self, connection: socket.socket) -> dict[str, Any]:
@@ -439,6 +535,7 @@ def _load_binding(root: Path, gateway: str) -> GatewayBinding:
         or account_fingerprint != value["account_fingerprint"]
     ):
         raise ValueError("RUN_BINDING_SETTINGS_DRIFT")
+    created_at_ms = _binding_created_at_ms(root, gateway, value)
     return GatewayBinding.create(
         gateway=gateway,
         environment=value["environment"],
@@ -450,8 +547,51 @@ def _load_binding(root: Path, gateway: str) -> GatewayBinding:
         state_store_path=str(root / ".demo-state" / "runs" / gateway),
         allowed_server_fingerprints=frozenset({value["server_fingerprint"]}),
         allowed_account_fingerprints=frozenset({value["account_fingerprint"]}),
-        created_at_ms=_now_ms(),
+        created_at_ms=created_at_ms,
     )
+
+
+def _binding_created_at_ms(root: Path, gateway: str, value: dict[str, Any]) -> int:
+    identity_digest = _digest(
+        {
+            "gateway": gateway,
+            "environment": value["environment"],
+            "server_fingerprint": value["server_fingerprint"],
+            "account_fingerprint": value["account_fingerprint"],
+            "credential_ref_digest": _digest(value["credential_ref"]),
+            "process_identity": f"vnpy-demo-{gateway.lower()}",
+            "rpc_endpoint": f"127.0.0.1:{17801 if gateway == 'XTP' else 17802}",
+            "state_store_path": str(root / ".demo-state" / "runs" / gateway),
+        }
+    )
+    path = root / ".demo-state" / "runs" / gateway / "binding-identity.json"
+    if path.is_file():
+        retained = _load_unique_json(path)
+        if (
+            not isinstance(retained, dict)
+            or set(retained) != {
+                "contract_version",
+                "identity_digest",
+                "created_at_ms",
+            }
+            or retained["contract_version"] != 1
+            or retained["identity_digest"] != identity_digest
+            or isinstance(retained["created_at_ms"], bool)
+            or not isinstance(retained["created_at_ms"], int)
+            or retained["created_at_ms"] <= 0
+        ):
+            raise ValueError("RUN_BINDING_IDENTITY_DRIFT")
+        return retained["created_at_ms"]
+    created_at_ms = _now_ms()
+    _atomic_json(
+        path,
+        {
+            "contract_version": 1,
+            "identity_digest": identity_digest,
+            "created_at_ms": created_at_ms,
+        },
+    )
+    return created_at_ms
 
 
 def _settings_fingerprints(

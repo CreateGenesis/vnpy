@@ -210,6 +210,10 @@ class BrokerSimulationContainment:
         )
         self._connection.commit()
 
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
     def contain(
         self,
         *,

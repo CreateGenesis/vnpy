@@ -47,6 +47,10 @@ class ReconciliationManager:
             self._outcomes[outcome.effect_id] = outcome
             self._operations[outcome.operation_key] = outcome.effect_id
 
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
     @property
     def new_exposure_blocked(self) -> bool:
         with self._lock:
@@ -134,6 +138,18 @@ class ReconciliationManager:
         with self._lock:
             effect_id = self._operations.get(operation_key)
             return self._outcomes.get(effect_id) if effect_id is not None else None
+
+    def unresolved_effect_ids(self) -> tuple[str, ...]:
+        """Return durable outcomes that prohibit new exposure."""
+
+        with self._lock:
+            return tuple(
+                sorted(
+                    outcome.effect_id
+                    for outcome in self._outcomes.values()
+                    if outcome.state in {"dispatched", "unknown", "partial"}
+                )
+            )
 
     def recover_uncertain(
         self,

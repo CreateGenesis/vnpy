@@ -181,6 +181,10 @@ class BrokerSimulationAuthority:
         self._connection.executescript(migration.read_text(encoding="utf-8"))
         self._lock = RLock()
 
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
     def create_campaign(
         self,
         *,
