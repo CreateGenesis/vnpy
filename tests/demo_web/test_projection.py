@@ -158,3 +158,44 @@ def test_projection_revision_is_idempotent_monotonic_and_restart_durable(tmp_pat
         store.publish(projection_input(7))
     with pytest.raises(ValueError, match="PROJECTION_SOURCE_REVISION_COLLISION"):
         store.publish(replace(projection_input(8), risk_state="blocked"))
+
+
+def test_projection_exposes_containment_state_and_only_bounded_next_actions(
+    tmp_path: Path,
+) -> None:
+    contained_xtp = replace(
+        gateway("XTP", 3_200),
+        state="paused",
+        reconciliation_state="uncertain",
+        residual_exposure_minor=153_750,
+        working_order_count=1,
+        unresolved_outcomes=1,
+        permitted_next_action="reconcile_original_operation",
+    )
+    projection = DemoProjectionStore(tmp_path / "projection.json").publish(
+        replace(
+            projection_input(),
+            campaign_state="paused",
+            current_gateways=(contained_xtp, gateway("TORA", 2_800)),
+            risk_state="blocking",
+        )
+    )
+
+    current = projection.to_public_dict()["current"]["gateways"][0]
+    assert current["residual_exposure_minor"] == 153_750
+    assert current["working_order_count"] == 1
+    assert current["unresolved_outcomes"] == 1
+    assert current["permitted_next_action"] == "reconcile_original_operation"
+
+    with pytest.raises(ValueError, match="PROJECTION_NEXT_ACTION_INVALID"):
+        DemoProjectionStore(tmp_path / "invalid.json").publish(
+            replace(
+                projection_input(),
+                current_gateways=(
+                    replace(
+                        gateway("XTP", 3_200),
+                        permitted_next_action="send_order",
+                    ),
+                ),
+            )
+        )
