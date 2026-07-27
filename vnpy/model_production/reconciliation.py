@@ -51,7 +51,8 @@ class ReconciliationManager:
     def new_exposure_blocked(self) -> bool:
         with self._lock:
             return bool(self._discrepancies) or any(
-                outcome.state in {"unknown", "partial"} for outcome in self._outcomes.values()
+                outcome.state in {"dispatched", "unknown", "partial"}
+                for outcome in self._outcomes.values()
             )
 
     def record_dispatch(self, effect_id: str, operation_key: str) -> None:
