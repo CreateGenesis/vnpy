@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 from threading import RLock
 from typing import Any
+from uuid import UUID
 
 from vnpy.model_production.contracts import canonical_json_v1
 
@@ -120,6 +121,7 @@ class DemoProjectionInput:
     source_revision: int
     updated_at_ms: int
     candidate: CandidateProjectionInput
+    campaign_id: str | None
     campaign_digest: str | None
     campaign_state: str
     current_gateways: tuple[GatewayProjectionInput, ...]
@@ -222,6 +224,7 @@ def _source_payload(value: DemoProjectionInput) -> dict[str, Any]:
             },
             "current": {
                 "label": "current_broker_simulation",
+                "campaign_id": value.campaign_id,
                 "campaign_digest": value.campaign_digest,
                 "campaign_state": value.campaign_state,
                 "gateways": [_gateway_dict(gateway) for gateway in value.current_gateways],
@@ -315,8 +318,15 @@ def _validate_projection_input(value: DemoProjectionInput) -> None:
         )
     ) or candidate.readiness not in {"ready", "blocked", "active", "unavailable"}:
         raise ValueError("PROJECTION_CANDIDATE_INVALID")
-    if value.campaign_digest is not None and not _DIGEST.fullmatch(value.campaign_digest):
+    if (value.campaign_id is None) != (value.campaign_digest is None):
         raise ValueError("PROJECTION_CAMPAIGN_INVALID")
+    if value.campaign_id is not None:
+        try:
+            UUID(value.campaign_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("PROJECTION_CAMPAIGN_INVALID") from exc
+        if value.campaign_digest is None or not _DIGEST.fullmatch(value.campaign_digest):
+            raise ValueError("PROJECTION_CAMPAIGN_INVALID")
     if not value.campaign_state or len(value.campaign_state) > 64:
         raise ValueError("PROJECTION_CAMPAIGN_INVALID")
     if len(value.current_gateways) > 2 or len({item.gateway for item in value.current_gateways}) != len(
@@ -486,6 +496,7 @@ def _validate_public_shape(value: dict[str, Any]) -> None:
         raise ValueError("PROJECTION_CANDIDATE_FIELDS_INVALID")
     if set(value["current"]) != {
         "label",
+        "campaign_id",
         "campaign_digest",
         "campaign_state",
         "gateways",
