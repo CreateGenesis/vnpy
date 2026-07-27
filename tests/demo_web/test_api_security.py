@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+import re
 from typing import Any
 
 import pytest
@@ -120,7 +121,7 @@ def test_api_requires_host_session_and_csrf_for_every_write() -> None:
 
 def test_routes_are_allowlisted_and_forbidden_trading_surfaces_do_not_exist() -> None:
     client, _ = authenticated_client()
-    route_paths = {route.path for route in client.app.routes}
+    route_paths = {route.path for route in client.app.routes if route.path.startswith("/api/")}
     assert route_paths == {
         "/api/v1/readiness",
         "/api/v1/projection",
@@ -144,6 +145,24 @@ def test_routes_are_allowlisted_and_forbidden_trading_surfaces_do_not_exist() ->
             path,
             headers={"Origin": ORIGIN, "X-CSRF-Token": CSRF_TOKEN},
         ).status_code == 404
+
+
+def test_root_bootstraps_same_origin_session_and_serves_built_assets() -> None:
+    client = TestClient(create_demo_app(config(), FakeBackend()))
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Auto Trade Investor Broker Simulation" in response.text
+    assert "__AUTO_TRADE_CSRF_TOKEN__" not in response.text
+    assert CSRF_TOKEN in response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert "default-src 'self'" in response.headers["content-security-policy"]
+    assert "HttpOnly" in response.headers["set-cookie"]
+    assert "SameSite=strict" in response.headers["set-cookie"]
+
+    asset_path = re.search(r'(?:src|href)="(/assets/[^"]+)"', response.text)
+    assert asset_path is not None
+    assert client.get(asset_path.group(1)).status_code == 200
 
 
 def test_responses_fail_closed_on_secret_bearing_backend_data() -> None:
