@@ -431,6 +431,14 @@ def _load_binding(root: Path, gateway: str) -> GatewayBinding:
     }
     if set(value) != required or value["environment"] != "broker_simulation":
         raise ValueError("RUN_BINDING_INVALID")
+    server_fingerprint, account_fingerprint = _settings_fingerprints(
+        root, gateway, value["credential_ref"]
+    )
+    if (
+        server_fingerprint != value["server_fingerprint"]
+        or account_fingerprint != value["account_fingerprint"]
+    ):
+        raise ValueError("RUN_BINDING_SETTINGS_DRIFT")
     return GatewayBinding.create(
         gateway=gateway,
         environment=value["environment"],
@@ -444,6 +452,31 @@ def _load_binding(root: Path, gateway: str) -> GatewayBinding:
         allowed_account_fingerprints=frozenset({value["account_fingerprint"]}),
         created_at_ms=_now_ms(),
     )
+
+
+def _settings_fingerprints(
+    root: Path, gateway: str, credential_ref: str
+) -> tuple[str, str]:
+    settings_path = Path(credential_ref)
+    if not settings_path.is_absolute():
+        settings_path = root / settings_path
+    settings_path = settings_path.resolve(strict=True)
+    settings = _load_unique_json(settings_path)
+    if not isinstance(settings, dict):
+        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
+    account_key = "账号"
+    server_keys = (
+        ("行情地址", "行情端口", "交易地址", "交易端口")
+        if gateway == "XTP"
+        else ("行情服务器", "交易服务器")
+    )
+    if account_key not in settings or any(key not in settings for key in server_keys):
+        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
+    account = settings[account_key]
+    if not isinstance(account, str) or not account.strip():
+        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
+    server_identity = {key: settings[key] for key in server_keys}
+    return _digest(server_identity), _digest({account_key: account})
 
 
 def _connect_gateway(root: Path, gateway: str, credential_ref: str) -> MainEngine:

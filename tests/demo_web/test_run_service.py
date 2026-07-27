@@ -99,6 +99,23 @@ def test_run_host_owns_prepare_start_pause_and_stop_without_agent_calls(
         assert forbidden not in serialized
 
 
+def test_run_host_rejects_gateway_settings_that_drift_from_approved_binding(
+    tmp_path: Path,
+) -> None:
+    install_state(tmp_path)
+    settings_path = tmp_path / ".demo-secrets" / "xtp-settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings["交易地址"] = "changed.example.invalid"
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+    try:
+        BrokerSimulationRunHost(tmp_path, "XTP", main_engine=FakeMainEngine())
+    except ValueError as exc:
+        assert str(exc) == "RUN_BINDING_SETTINGS_DRIFT"
+    else:
+        raise AssertionError("gateway settings drift was accepted")
+
+
 def install_state(root: Path) -> None:
     state = root / ".demo-state"
     secrets = root / ".demo-secrets"
@@ -122,12 +139,26 @@ def install_state(root: Path) -> None:
         ],
         "lifecycle_revision": 1,
     }
+    settings = {
+        "账号": "simulation-account",
+        "行情地址": "quote.simulation.invalid",
+        "行情端口": 10001,
+        "交易地址": "trade.simulation.invalid",
+        "交易端口": 10002,
+    }
     bindings = [
         {
             "name": "XTP",
             "environment": "broker_simulation",
-            "server_fingerprint": digest("server"),
-            "account_fingerprint": digest("account"),
+            "server_fingerprint": payload_digest(
+                {
+                    "行情地址": settings["行情地址"],
+                    "行情端口": settings["行情端口"],
+                    "交易地址": settings["交易地址"],
+                    "交易端口": settings["交易端口"],
+                }
+            ),
+            "account_fingerprint": payload_digest({"账号": settings["账号"]}),
             "credential_ref": ".demo-secrets/xtp-settings.json",
         }
     ]
@@ -135,4 +166,15 @@ def install_state(root: Path) -> None:
     (state / "ready-candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
     (secrets / "gateway-bindings.json").write_text(json.dumps(bindings), encoding="utf-8")
     (secrets / "operator.json").write_text(json.dumps(operator), encoding="utf-8")
-    (secrets / "xtp-settings.json").write_text("{}", encoding="utf-8")
+    (secrets / "xtp-settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+
+def payload_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"sha256:{sha256(encoded).hexdigest()}"
