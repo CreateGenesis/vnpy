@@ -4,18 +4,36 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from html import escape
 from hmac import compare_digest
+from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 _SESSION_COOKIE = "auto_trade_host_session"
+_CSRF_PLACEHOLDER = "__AUTO_TRADE_CSRF_TOKEN__"
+_STATIC_DIR = Path(__file__).with_name("static")
 _DIGEST_PATTERN = r"^(?:sha256|blake3):[0-9a-f]{64}$"
+_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+        "object-src 'none'",
+        "form-action 'none'",
+        "connect-src 'self'",
+        "img-src 'self' data:",
+        "style-src 'self'",
+        "script-src 'self'",
+    )
+)
 _FORBIDDEN_PUBLIC_KEYS = frozenset(
     {
         "account",
@@ -115,6 +133,9 @@ def create_demo_app(config: DemoWebConfig, backend: DemoWebBackend) -> FastAPI:
     """Create the exact allowlisted local API surface."""
 
     config.validate()
+    index_template = (_STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    if _CSRF_PLACEHOLDER not in index_template:
+        raise ValueError("DEMO_CSRF_PLACEHOLDER_REQUIRED")
     app = FastAPI(
         title="Auto Trade Investor Demo",
         version="1.0.0",
@@ -145,6 +166,28 @@ def create_demo_app(config: DemoWebConfig, backend: DemoWebBackend) -> FastAPI:
 
     read_dependencies = [Depends(require_session)]
     write_dependencies = [Depends(require_session), Depends(require_write_guard)]
+
+    @app.get("/", response_class=HTMLResponse)
+    def get_dashboard() -> HTMLResponse:
+        content = index_template.replace(
+            _CSRF_PLACEHOLDER,
+            escape(config.csrf_token, quote=True),
+        )
+        response = HTMLResponse(
+            content=content,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": _CONTENT_SECURITY_POLICY,
+            },
+        )
+        response.set_cookie(
+            key=_SESSION_COOKIE,
+            value=config.session_token,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+        return response
 
     @app.get("/api/v1/readiness", dependencies=read_dependencies)
     def get_readiness() -> JSONResponse:
@@ -195,6 +238,8 @@ def create_demo_app(config: DemoWebConfig, backend: DemoWebBackend) -> FastAPI:
         await websocket.accept()
         await websocket.send_json({"event": "projection.snapshot", "data": projection})
         await websocket.close(code=1000)
+
+    app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
 
     return app
 
