@@ -2,10 +2,25 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { vi } from "vitest";
 
 import { App } from "./App";
-import type { ConnectionState, DemoApi, DemoProjection } from "./api";
+import type { ConnectionState, ControlReceipt, DemoApi, DemoProjection } from "./api";
 
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`;
+
+const controlReceipt = (action: "pause" | "emergency_stop"): ControlReceipt => ({
+  contract_version: 1,
+  action,
+  state: action === "pause" ? "paused" : "stopped",
+  request_digest: digest("4"),
+  started_at_ns: 1_000_000_000,
+  completed_at_ns: 1_200_000_000,
+  hard_stop_deadline_met: true,
+  gateways: [
+    { gateway: "TORA", state: action === "pause" ? "paused" : "stopped", receipt_digest: digest("5") },
+    { gateway: "XTP", state: action === "pause" ? "paused" : "stopped", receipt_digest: digest("6") },
+  ],
+  receipt_digest: digest(action === "pause" ? "7" : "8"),
+});
 
 const projection: DemoProjection = {
   contract_version: 1,
@@ -117,8 +132,8 @@ function apiMock(): {
   const api: DemoApi = {
     getProjection: vi.fn().mockResolvedValue(projection),
     startCampaign: vi.fn().mockResolvedValue({ state: "starting" }),
-    pauseCampaign: vi.fn().mockResolvedValue({ state: "paused" }),
-    emergencyStop: vi.fn().mockResolvedValue({ state: "stopped" }),
+    pauseCampaign: vi.fn().mockResolvedValue(controlReceipt("pause")),
+    emergencyStop: vi.fn().mockResolvedValue(controlReceipt("emergency_stop")),
     subscribe: vi.fn((onProjection, onConnection) => {
       projectionListener = onProjection;
       connectionListener = onConnection;
@@ -191,15 +206,59 @@ test("surfaces websocket recovery and applies the recovered projection without r
   expect(screen.getByText("Live connection")).toBeInTheDocument();
 });
 
-test("offers only campaign, pause, and emergency controls", async () => {
+test("requires explicit confirmation before pause and emergency controls", async () => {
   const mock = apiMock();
   render(<App api={mock.api} />);
   await screen.findByText("Current broker simulation");
 
   fireEvent.click(screen.getByRole("button", { name: "Pause campaign" }));
+  expect(mock.api.pauseCampaign).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog", { name: "Confirm pause campaign" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Confirm pause" }));
   await waitFor(() => expect(mock.api.pauseCampaign).toHaveBeenCalledOnce());
   await waitFor(() => expect(screen.getByRole("button", { name: "Emergency stop" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "Emergency stop" }));
+  expect(mock.api.emergencyStop).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog", { name: "Confirm emergency stop" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Confirm emergency stop" }));
   await waitFor(() => expect(mock.api.emergencyStop).toHaveBeenCalledOnce());
   expect(screen.queryByRole("button", { name: /order|cancel/i })).not.toBeInTheDocument();
+});
+
+test("shows immutable control receipts and contained run risk", async () => {
+  const mock = apiMock();
+  const contained: DemoProjection = {
+    ...projection,
+    risk_state: "blocking",
+    current: {
+      ...projection.current,
+      campaign_state: "paused",
+      gateways: projection.current.gateways.map((gateway) => gateway.gateway === "XTP" ? {
+        ...gateway,
+        state: "paused",
+        reconciliation_state: "uncertain",
+        residual_exposure_minor: 153_750,
+        working_order_count: 1,
+        unresolved_outcomes: 1,
+        permitted_next_action: "reconcile_original_operation",
+      } : gateway),
+    },
+  };
+  mock.api.getProjection = vi.fn().mockResolvedValue(contained);
+  render(<App api={mock.api} />);
+
+  expect(await screen.findByTestId("XTP-residual-exposure")).toHaveTextContent("1,537.50");
+  expect(screen.getByTestId("XTP-working-orders")).toHaveTextContent("1");
+  expect(screen.getByTestId("XTP-unresolved-outcomes")).toHaveTextContent("1");
+  expect(screen.getByText("reconcile original operation")).toBeInTheDocument();
+  expect(screen.getByText("100 locked T+1")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Pause campaign" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm pause" }));
+
+  const receipt = await screen.findByRole("status", { name: "Immutable control receipt" });
+  expect(receipt).toHaveTextContent(controlReceipt("pause").receipt_digest);
+  expect(receipt).toHaveTextContent("XTP paused");
+  expect(receipt).toHaveTextContent("TORA paused");
+  expect(receipt).toHaveTextContent("Deadline met");
 });
