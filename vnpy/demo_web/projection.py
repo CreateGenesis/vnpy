@@ -21,6 +21,16 @@ _SYMBOL = re.compile(r"^[0-9]{6}\.(?:SSE|SZSE|BSE)$")
 _INCIDENT = re.compile(r"^[A-Z0-9_]{1,96}$")
 _GATEWAYS = frozenset({"XTP", "TORA"})
 _ACTIONS = frozenset({"start", "pause", "emergency_stop"})
+_NEXT_ACTIONS = frozenset(
+    {
+        "none",
+        "pause",
+        "emergency_stop",
+        "monitor_residual_exposure",
+        "reconcile_original_operation",
+        "start_new_campaign",
+    }
+)
 _FORBIDDEN_KEYS = frozenset(
     {
         "account",
@@ -379,7 +389,7 @@ def _validate_gateway(value: GatewayProjectionInput) -> None:
     _validate_latency(value.broker_latency_us)
     if any(_INCIDENT.fullmatch(item) is None for item in value.incidents):
         raise ValueError("PROJECTION_INCIDENT_INVALID")
-    if not value.permitted_next_action or len(value.permitted_next_action) > 96:
+    if value.permitted_next_action not in _NEXT_ACTIONS:
         raise ValueError("PROJECTION_NEXT_ACTION_INVALID")
     for position in value.positions:
         if _SYMBOL.fullmatch(position.symbol) is None or any(
