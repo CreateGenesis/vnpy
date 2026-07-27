@@ -120,6 +120,19 @@ class DemoWebBackend(Protocol):
     def evidence(self, campaign_id: str) -> dict[str, Any]: ...
 
 
+class DemoGuidanceBackend(Protocol):
+    """Research-only Side Master boundary; never a main-Master or trading bridge."""
+
+    def send_message(self, command: Mapping[str, Any]) -> dict[str, Any]: ...
+
+    def decide_proposal(
+        self,
+        proposal_id: str,
+        decision: Literal["confirm", "reject"],
+        command: Mapping[str, Any],
+    ) -> dict[str, Any]: ...
+
+
 class CampaignStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -135,11 +148,38 @@ class CampaignStartRequest(BaseModel):
         return value
 
 
+class SideMasterChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    session_id: str = Field(min_length=1, max_length=128)
+    mission_id: str = Field(min_length=1, max_length=128)
+    content: str = Field(min_length=1, max_length=8_000)
+    idempotency_key: str = Field(min_length=16, max_length=128)
+
+    @field_validator("session_id", "mission_id", "content")
+    @classmethod
+    def require_nonblank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("blank value")
+        return value
+
+
+class SideMasterDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_proposal_digest: str = Field(pattern=_DIGEST_PATTERN)
+    idempotency_key: str = Field(min_length=16, max_length=128)
+
+
 class _ResponseRedactionError(RuntimeError):
     pass
 
 
-def create_demo_app(config: DemoWebConfig, backend: DemoWebBackend) -> FastAPI:
+def create_demo_app(
+    config: DemoWebConfig,
+    backend: DemoWebBackend,
+    guidance: DemoGuidanceBackend | None = None,
+) -> FastAPI:
     """Create the exact allowlisted local API surface."""
 
     config.validate()
@@ -229,6 +269,39 @@ def create_demo_app(config: DemoWebConfig, backend: DemoWebBackend) -> FastAPI:
     @app.get("/api/v1/evidence/{campaign_id}", dependencies=read_dependencies)
     def get_evidence(campaign_id: UUID) -> JSONResponse:
         return _invoke(lambda: backend.evidence(str(campaign_id)), accepted=False)
+
+    @app.post(
+        "/api/v1/chat/messages",
+        dependencies=write_dependencies,
+        status_code=202,
+    )
+    def send_side_master_message(command: SideMasterChatRequest) -> JSONResponse:
+        if guidance is None:
+            return _error_response(503, "SIDE_MASTER_UNAVAILABLE")
+        return _invoke(
+            lambda: guidance.send_message(command.model_dump(mode="json")),
+            accepted=True,
+        )
+
+    @app.post(
+        "/api/v1/chat/proposals/{proposal_id}/{decision}",
+        dependencies=write_dependencies,
+    )
+    def decide_side_master_proposal(
+        proposal_id: UUID,
+        decision: Literal["confirm", "reject"],
+        command: SideMasterDecisionRequest,
+    ) -> JSONResponse:
+        if guidance is None:
+            return _error_response(503, "SIDE_MASTER_UNAVAILABLE")
+        return _invoke(
+            lambda: guidance.decide_proposal(
+                str(proposal_id),
+                decision,
+                command.model_dump(mode="json"),
+            ),
+            accepted=False,
+        )
 
     @app.websocket("/api/v1/events")
     async def stream_events(websocket: WebSocket) -> None:
