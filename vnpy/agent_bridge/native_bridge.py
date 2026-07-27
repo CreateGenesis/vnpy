@@ -1,4 +1,4 @@
-"""Production model transport over the Rust PyO3 NativeBridge.
+"""Production model transport over the model-only Rust PyO3 bridge.
 
 The Python mmap ring remains available for research traffic only. Model input
 and decision traffic must pass through this module so an ACK can only be sent
@@ -91,14 +91,13 @@ class NativeModelBridge:
             self._native = native
             return
         if root is None:
-            raise ValueError("root is required when no NativeBridge is supplied")
+            raise ValueError("root is required when no native model transport is supplied")
         module = importlib.import_module("vnpy_bridge_py")
-        self._native = module.NativeBridge(
+        self._native = module.NativeModelTransport(
             str(root),
             "vnpy-to-agentd",
-            "agentd-to-vnpy",
+            1,
             critical_capacity,
-            57_344,
         )
 
     def publish_model_input(
