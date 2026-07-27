@@ -1,0 +1,7 @@
+# Python 3.13 Windows broker-simulation host dependencies.
+# Install vn.py itself from this checked-out source tree before applying this file.
+--only-binary=vnpy_xtp,vnpy_tora
+vnpy_xtp==2.2.32.2.3
+vnpy_tora==2026.5.14
+vnpy_webtrader==1.1.0
+importlib-metadata==8.7.0
