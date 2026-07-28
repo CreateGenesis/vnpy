@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from base64 import b64encode
 from hashlib import sha256
 import json
 import os
@@ -64,6 +65,13 @@ class ServiceSpec:
 class ProcessRuntime(Protocol):
     def spawn(self, spec: ServiceSpec, arguments: tuple[str, ...]) -> ProcessIdentity: ...
 
+    def spawn_with_secret(
+        self,
+        spec: ServiceSpec,
+        arguments: tuple[str, ...],
+        secret_payload: bytes,
+    ) -> ProcessIdentity: ...
+
     def inspect(self, pid: int) -> ProcessIdentity | None: ...
 
     def terminate(self, pid: int) -> None: ...
@@ -78,6 +86,27 @@ class LocalProcessRuntime:
         self._children: dict[int, subprocess.Popen[bytes]] = {}
 
     def spawn(self, spec: ServiceSpec, arguments: tuple[str, ...]) -> ProcessIdentity:
+        return self._spawn(spec, arguments, environment=None)
+
+    def spawn_with_secret(
+        self,
+        spec: ServiceSpec,
+        arguments: tuple[str, ...],
+        secret_payload: bytes,
+    ) -> ProcessIdentity:
+        if not secret_payload or len(secret_payload) > 65_536:
+            raise SupervisorError("SUPERVISOR_SECRET_PAYLOAD_INVALID")
+        environment = os.environ.copy()
+        environment["AUTO_TRADE_ONE_USE_SECRET"] = b64encode(secret_payload).decode("ascii")
+        return self._spawn(spec, arguments, environment=environment)
+
+    def _spawn(
+        self,
+        spec: ServiceSpec,
+        arguments: tuple[str, ...],
+        *,
+        environment: dict[str, str] | None,
+    ) -> ProcessIdentity:
         if not spec.executable.is_file() or _file_digest(spec.executable) != spec.executable_digest:
             raise SupervisorError("SUPERVISOR_EXECUTABLE_MISMATCH")
         child = subprocess.Popen(
@@ -87,6 +116,7 @@ class LocalProcessRuntime:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            env=environment,
         )
         self._children[child.pid] = child
         for _ in range(50):
@@ -198,6 +228,44 @@ class FixedServiceSupervisor:
             stopped = self._stop(state, service, increment=False)
             return self._start(self._load(), self._specs[service], prior_revision=stopped["revision"])
 
+    def handle_secret(
+        self,
+        command: dict[str, Any],
+        secret_payload: bytes,
+    ) -> dict[str, Any]:
+        if set(command) != self._REQUEST_KEYS:
+            raise SupervisorError("SUPERVISOR_COMMAND_INVALID")
+        try:
+            service = ServiceName(command["service"])
+            action = ServiceAction(command["action"])
+        except (ValueError, TypeError) as exc:
+            raise SupervisorError("SUPERVISOR_SECRET_SERVICE_DENIED") from exc
+        if service not in {ServiceName.RUN_XTP, ServiceName.RUN_TORA, ServiceName.RQDATA_FETCHER}:
+            raise SupervisorError("SUPERVISOR_SECRET_SERVICE_DENIED")
+        if service not in self._specs or action not in {ServiceAction.START, ServiceAction.RESTART}:
+            raise SupervisorError("SUPERVISOR_SECRET_SERVICE_DENIED")
+        expected = command["expected_revision"]
+        if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+            raise SupervisorError("SUPERVISOR_COMMAND_INVALID")
+        if not secret_payload or len(secret_payload) > 65_536:
+            raise SupervisorError("SUPERVISOR_SECRET_PAYLOAD_INVALID")
+        with self._lock:
+            state = self._load()
+            if state["revision"] != expected:
+                raise SupervisorError("SUPERVISOR_REVISION_CONFLICT")
+            if action is ServiceAction.RESTART:
+                stopped = self._stop(state, service, increment=False)
+                state = self._load()
+                prior_revision = stopped["revision"]
+            else:
+                prior_revision = None
+            return self._start(
+                state,
+                self._specs[service],
+                prior_revision=prior_revision,
+                secret_payload=secret_payload,
+            )
+
     def reconcile(self, service: ServiceName) -> dict[str, Any]:
         with self._lock:
             if service not in self._specs:
@@ -290,11 +358,16 @@ class FixedServiceSupervisor:
         spec: ServiceSpec,
         *,
         prior_revision: int | None = None,
+        secret_payload: bytes | None = None,
     ) -> dict[str, Any]:
         existing = state["services"].get(spec.service.value)
         if existing and existing.get("state") == "ready":
             return self.reconcile(spec.service)
-        identity = self._runtime.spawn(spec, spec.arguments())
+        identity = (
+            self._runtime.spawn_with_secret(spec, spec.arguments(), secret_payload)
+            if secret_payload is not None
+            else self._runtime.spawn(spec, spec.arguments())
+        )
         endpoint = spec.endpoint()
         if identity.executable_digest != spec.executable_digest:
             self._runtime.terminate(identity.pid)

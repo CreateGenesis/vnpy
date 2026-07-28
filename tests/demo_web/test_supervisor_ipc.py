@@ -62,6 +62,7 @@ def test_secret_lease_is_expiring_audience_bound_and_one_use() -> None:
 @dataclass
 class FakeSupervisor:
     calls: list[dict[str, object]] = field(default_factory=list)
+    secret_calls: list[tuple[dict[str, object], bytes]] = field(default_factory=list)
 
     def handle(self, command: dict[str, object]) -> dict[str, object]:
         self.calls.append(command)
@@ -73,6 +74,14 @@ class FakeSupervisor:
 
     def reconcile(self, service: ServiceName) -> dict[str, object]:
         return {"service": service.value, "state": "stopped", "revision": 4}
+
+    def handle_secret(
+        self,
+        command: dict[str, object],
+        secret_payload: bytes,
+    ) -> dict[str, object]:
+        self.secret_calls.append((command, secret_payload))
+        return {"service": command["service"], "state": "ready", "revision": 5}
 
 
 def test_loopback_ipc_client_dispatches_only_fixed_supervisor_operations() -> None:
@@ -125,3 +134,36 @@ def test_health_and_secret_lease_payloads_are_strict() -> None:
             nonce="nonce-0000000011",
             expires_at_ms=2_000,
         )
+
+
+def test_secret_start_delivers_one_use_payload_without_returning_it() -> None:
+    supervisor = FakeSupervisor()
+    server = SupervisorIpcServer(
+        ("127.0.0.1", 0),
+        authentication_key=b"m" * 32,
+        supervisor=supervisor,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        client = SupervisorIpcClient((host, port), authentication_key=b"m" * 32)
+        secret = b'{"account":"write-only","password":"must-not-return"}'
+
+        result = client.handle_with_secret(
+            {"service": "run_xtp", "action": "start", "expected_revision": 4},
+            secret,
+        )
+
+        assert result == {"service": "run_xtp", "state": "ready", "revision": 5}
+        assert supervisor.secret_calls == [
+            (
+                {"service": "run_xtp", "action": "start", "expected_revision": 4},
+                secret,
+            )
+        ]
+        assert b"must-not-return" not in str(result).encode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

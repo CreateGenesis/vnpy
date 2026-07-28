@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from base64 import b64decode
+from collections.abc import Mapping
 import argparse
 from hashlib import sha256
 from importlib import import_module
@@ -32,13 +34,17 @@ from vnpy.model_production.journal import ModelProductionJournal
 from vnpy.model_production.reconciliation import ReconciliationManager
 from vnpy.model_production.safety import BrokerSimulationContainment, HardSafetyController
 
-from .runtime import DemoCandidate, _load_candidate, _load_operator_digest, _load_unique_json
+from .gateway_settings import GatewaySettingsError, map_gateway_settings
+from .runtime import DemoCandidate, _load_candidate, _load_unique_json
 
 
 _DIGEST = re.compile(r"^(?:sha256|blake3):[0-9a-f]{64}$")
 _OPERATIONS = frozenset(
     {
         "run.status.v1",
+        "run.gateway_health.v1",
+        "run.reconnect.v1",
+        "run.drain_shutdown.v1",
         "run.evidence.v1",
         "run.prepare_campaign.v1",
         "run.start_campaign.v1",
@@ -47,6 +53,11 @@ _OPERATIONS = frozenset(
     }
 )
 _MAXIMUM_FRAME = 1_048_576
+_ONE_USE_SECRET_ENV = "AUTO_TRADE_ONE_USE_SECRET"
+
+
+class RunOperationError(RuntimeError):
+    pass
 
 
 class BrokerSimulationRunHost:
@@ -57,23 +68,54 @@ class BrokerSimulationRunHost:
         project_root: str | Path,
         gateway: str,
         *,
+        configuration_version: int,
+        configuration_digest: str,
+        operator_identity_digest: str,
+        gateway_public: Mapping[str, Any],
+        gateway_secrets: Mapping[str, str],
         main_engine: Any | None = None,
         model_bridge: NativeModelBridge | None = None,
     ) -> None:
         if gateway not in {"XTP", "TORA"}:
             raise ValueError("RUN_GATEWAY_INVALID")
+        if (
+            not isinstance(configuration_version, int)
+            or isinstance(configuration_version, bool)
+            or configuration_version < 1
+            or _DIGEST.fullmatch(configuration_digest) is None
+            or _DIGEST.fullmatch(operator_identity_digest) is None
+        ):
+            raise ValueError("RUN_CONFIGURATION_INVALID")
         self._root = Path(project_root).resolve(strict=True)
         self.gateway = gateway
-        candidate = _load_candidate(self._root / ".demo-state/ready-candidate.json")
-        if candidate is None or not candidate.ready:
-            raise ValueError("RUN_CANDIDATE_NOT_READY")
-        self._candidate: DemoCandidate = candidate
-        self._binding = _load_binding(self._root, gateway)
+        self._configuration_version = configuration_version
+        self._configuration_digest = configuration_digest
+        self._operator_identity_digest = operator_identity_digest
+        self._gateway_public = dict(gateway_public)
+        self._gateway_secrets = dict(gateway_secrets)
+        try:
+            self._gateway_settings = map_gateway_settings(
+                gateway,
+                self._gateway_public,
+                self._gateway_secrets,
+            )
+        except GatewaySettingsError as exc:
+            raise ValueError(str(exc)) from exc
+        self._candidate: DemoCandidate | None = None
+        self._binding = _create_binding(
+            self._root,
+            gateway,
+            configuration_version=configuration_version,
+            configuration_digest=configuration_digest,
+            public=self._gateway_public,
+            secrets=self._gateway_secrets,
+        )
         self.run_digest = _digest(
             {
                 "gateway": gateway,
                 "binding_digest": self._binding.binding_digest,
-                "candidate_digest": candidate.candidate_digest,
+                "configuration_version": configuration_version,
+                "configuration_digest": configuration_digest,
                 "process_identity": self._binding.process_identity,
             }
         )
@@ -82,9 +124,7 @@ class BrokerSimulationRunHost:
         self._host_state_path = run_root / "host-state.json"
         self._database = run_root / "authority.db"
         self._authority = BrokerSimulationAuthority(self._database)
-        self._main_engine = main_engine or _connect_gateway(
-            self._root, gateway, self._binding.credential_ref
-        )
+        self._main_engine = main_engine or _connect_gateway(gateway, self._gateway_settings)
         self._containment = BrokerSimulationContainment(
             main_engine=self._main_engine,
             gateway_name=gateway,
@@ -103,12 +143,15 @@ class BrokerSimulationRunHost:
         self._coordinator: BrokerSimulationCoordinator | None = None
         self._model_loop: BrokerSimulationModelLoop | None = None
         self._closed = False
-        self._operator_identity_digest = _load_operator_digest(
-            self._root / ".demo-secrets/operator.json"
-        )
+        self._shutdown_requested = False
         retained = self._read_host_state()
         if retained is not None and retained.get("state") == "active":
+            self._candidate = self._require_ready_candidate()
             self._ensure_model_loop(str(retained["campaign_id"])).start()
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_requested
 
     def handle(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         if operation not in _OPERATIONS:
@@ -118,6 +161,13 @@ class BrokerSimulationRunHost:
         try:
             if operation == "run.status.v1":
                 return self._response(operation, self._state_name(), self._public_status())
+            if operation == "run.gateway_health.v1":
+                status = self._public_status()
+                return self._response(operation, status["connection_state"], status)
+            if operation == "run.reconnect.v1":
+                return self._reconnect(operation, payload)
+            if operation == "run.drain_shutdown.v1":
+                return self._drain_shutdown(operation, payload)
             if operation == "run.prepare_campaign.v1":
                 return self._prepare(operation, payload)
             if operation == "run.start_campaign.v1":
@@ -127,14 +177,18 @@ class BrokerSimulationRunHost:
             if operation == "run.emergency_stop.v1":
                 return self._stop(operation, payload)
             return self._evidence(operation, payload)
+        except RunOperationError as exc:
+            return self._response(operation, "blocked", {"error_code": str(exc)})
         except Exception:
             return self._response(operation, "blocked", {"error_code": "OPERATION_FAILED"})
 
     def _prepare(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         campaign_id = _uuid(payload.get("campaign_id"))
         campaign_digest = _required_digest(payload.get("campaign_digest"))
-        if payload.get("candidate_digest") != self._candidate.candidate_digest:
-            raise ValueError("candidate mismatch")
+        candidate = self._require_ready_candidate()
+        if payload.get("candidate_digest") != candidate.candidate_digest:
+            raise RunOperationError("RUN_CANDIDATE_IDENTITY_MISMATCH")
+        self._candidate = candidate
         _idempotency(payload.get("idempotency_key"))
         retained = self._read_host_state()
         if retained is not None:
@@ -148,15 +202,15 @@ class BrokerSimulationRunHost:
         now_ms = _now_ms()
         self._authority.create_campaign(
             campaign_id=campaign_id,
-            candidate_digest=self._candidate.candidate_digest,
-            package_digest=self._candidate.package_digest,
-            configuration_digest=self._candidate.configuration_digest,
-            policy_digest=self._candidate.policy_digest,
-            symbol_set=self._candidate.symbols,
-            calendar_sessions=tuple(item.isoformat() for item in self._candidate.calendar_sessions),
+            candidate_digest=candidate.candidate_digest,
+            package_digest=candidate.package_digest,
+            configuration_digest=candidate.configuration_digest,
+            policy_digest=candidate.policy_digest,
+            symbol_set=candidate.symbols,
+            calendar_sessions=tuple(item.isoformat() for item in candidate.calendar_sessions),
             operator_identity_digest=self._operator_identity_digest,
             bindings=(self._binding,),
-            lifecycle_revision=self._candidate.lifecycle_revision,
+            lifecycle_revision=candidate.lifecycle_revision,
             now_ms=now_ms,
         )
         starting_equity = self._equity_minor()
@@ -172,6 +226,58 @@ class BrokerSimulationRunHost:
         )
         self._ensure_model_loop(campaign_id)
         return self._response(operation, "prepared", {"campaign_id": campaign_id})
+
+    def _reconnect(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _idempotency(payload.get("idempotency_key"))
+        state = self._read_host_state()
+        if state is not None and state.get("state") in {"starting", "active", "pausing"}:
+            raise RunOperationError("RUN_RECONNECT_CAMPAIGN_ACTIVE")
+        status = self._public_status()
+        if status["working_order_count"] or status["unresolved_outcomes"]:
+            raise RunOperationError("RUN_RECONNECT_RECONCILIATION_REQUIRED")
+        _disconnect_gateway(self._main_engine, self.gateway)
+        self._main_engine.connect(dict(self._gateway_settings), self.gateway)
+        status = self._public_status()
+        return self._response(operation, status["connection_state"], status)
+
+    def _drain_shutdown(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _idempotency(payload.get("idempotency_key"))
+        state = self._read_host_state()
+        if state is not None and state.get("state") in {"starting", "active", "pausing"}:
+            self._close_model_loop()
+            self._authority.pause_campaign(state["campaign_id"], now_ms=_now_ms())
+            self._containment.contain(
+                action="pause",
+                campaign_id=state["campaign_id"],
+                detected_at_ns=monotonic_ns(),
+            )
+            state["state"] = "paused"
+            state["updated_at_ms"] = _now_ms()
+            self._write_host_state(state)
+        status = self._public_status()
+        if (
+            status["working_order_count"]
+            or status["unresolved_outcomes"]
+            or status["residual_exposure_minor"]
+        ):
+            raise RunOperationError("RUN_DRAIN_RECONCILIATION_REQUIRED")
+        _disconnect_gateway(self._main_engine, self.gateway)
+        if state is not None:
+            state["state"] = "stopped"
+            state["updated_at_ms"] = _now_ms()
+            self._write_host_state(state)
+        self._shutdown_requested = True
+        return self._response(
+            operation,
+            "stopped",
+            {
+                "connection_state": "disconnected",
+                "reconciliation_state": "complete",
+                "working_order_count": 0,
+                "unresolved_outcomes": 0,
+                "residual_exposure_minor": 0,
+            },
+        )
 
     def _start(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         state = self._require_campaign(payload)
@@ -310,6 +416,9 @@ class BrokerSimulationRunHost:
         self._closed = True
 
     def _ensure_model_loop(self, campaign_id: str) -> BrokerSimulationModelLoop:
+        candidate = self._candidate
+        if candidate is None:
+            raise RunOperationError("RUN_CANDIDATE_NOT_READY")
         if self._model_loop is not None:
             if self._coordinator is None or self._coordinator.campaign_id != campaign_id:
                 raise RuntimeError("MODEL_LOOP_CAMPAIGN_DRIFT")
@@ -326,8 +435,8 @@ class BrokerSimulationRunHost:
                 journal=self._journal,
                 safety=self._safety,
                 expected_producer_id=f"modeld:{self._runtime_slot}",
-                active_package_digest=self._candidate.package_digest,
-                lifecycle_revision=self._candidate.lifecycle_revision,
+                active_package_digest=candidate.package_digest,
+                lifecycle_revision=candidate.lifecycle_revision,
                 stage="broker_simulation",
             ),
             executor=self._executor,
@@ -344,12 +453,12 @@ class BrokerSimulationRunHost:
             main_engine=self._main_engine,
             database=self._database,
             gateway=self.gateway,
-            package_digest=self._candidate.package_digest,
-            configuration_digest=self._candidate.configuration_digest,
-            policy_digest=self._candidate.policy_digest,
+            package_digest=candidate.package_digest,
+            configuration_digest=candidate.configuration_digest,
+            policy_digest=candidate.policy_digest,
             runtime_slot=self._runtime_slot,
-            lifecycle_revision=self._candidate.lifecycle_revision,
-            symbols=self._candidate.symbols,
+            lifecycle_revision=candidate.lifecycle_revision,
+            symbols=candidate.symbols,
         )
         return self._model_loop
 
@@ -366,10 +475,20 @@ class BrokerSimulationRunHost:
         return round(sum(balances) * 100) if balances else None
 
     def _state_name(self) -> str:
+        if self._shutdown_requested:
+            return "stopped"
         state = self._read_host_state()
         if state is not None:
             return str(state["state"])
         return "ready" if self._equity_minor() is not None else "blocked"
+
+    def _require_ready_candidate(self) -> DemoCandidate:
+        candidate = _load_candidate(self._root / ".demo-state/ready-candidate.json")
+        if candidate is None or not candidate.ready:
+            raise RunOperationError("RUN_CANDIDATE_NOT_READY")
+        if candidate.configuration_digest != self._configuration_digest:
+            raise RunOperationError("RUN_CANDIDATE_CONFIGURATION_MISMATCH")
+        return candidate
 
     def _require_campaign(
         self, payload: dict[str, Any], *, require_id: bool = True
@@ -460,6 +579,8 @@ class RunIpcServer:
                     response = self._serve_connection(connection)
                     encoded = _json_bytes(response)
                     connection.sendall(struct.pack(">I", len(encoded)) + encoded)
+                    if self._host.shutdown_requested:
+                        return
         finally:
             self._listener.close()
             self._host.close()
@@ -496,6 +617,7 @@ def main() -> None:
     parser.add_argument("--address", required=True)
     args = parser.parse_args()
     root = args.project_root.resolve(strict=True)
+    launch = _consume_one_use_secret(args.gateway)
     token_path = root / ".demo-secrets" / f"run-{args.gateway.lower()}-ipc-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     if token_path.exists():
@@ -506,62 +628,137 @@ def main() -> None:
     if not 24 <= len(token) <= 512:
         raise ValueError("RUN_IPC_TOKEN_INVALID")
     RunIpcServer(
-        BrokerSimulationRunHost(root, args.gateway), args.address, token
+        BrokerSimulationRunHost(root, args.gateway, **launch), args.address, token
     ).serve_forever()
 
 
-def _load_binding(root: Path, gateway: str) -> GatewayBinding:
-    values = _load_unique_json(root / ".demo-secrets/gateway-bindings.json")
-    if not isinstance(values, list):
-        raise ValueError("RUN_BINDINGS_INVALID")
-    matches = [value for value in values if isinstance(value, dict) and value.get("name") == gateway]
-    if len(matches) != 1:
-        raise ValueError("RUN_BINDING_NOT_UNIQUE")
-    value = matches[0]
+def _consume_one_use_secret(gateway: str) -> dict[str, Any]:
+    encoded = os.environ.pop(_ONE_USE_SECRET_ENV, None)
+    if not isinstance(encoded, str) or not 1 <= len(encoded) <= 87_384:
+        raise ValueError("RUN_ONE_USE_SECRET_REQUIRED")
+    try:
+        raw = b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise ValueError("RUN_ONE_USE_SECRET_INVALID") from exc
+    if not 1 <= len(raw) <= 65_536:
+        raise ValueError("RUN_ONE_USE_SECRET_INVALID")
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("RUN_ONE_USE_SECRET_INVALID") from exc
+    finally:
+        del raw, encoded
     required = {
-        "name",
-        "environment",
-        "server_fingerprint",
-        "account_fingerprint",
-        "credential_ref",
+        "contract_version",
+        "gateway",
+        "configuration_version",
+        "configuration_digest",
+        "operator_identity_digest",
+        "public",
+        "secrets",
     }
-    if set(value) != required or value["environment"] != "broker_simulation":
-        raise ValueError("RUN_BINDING_INVALID")
-    server_fingerprint, account_fingerprint = _settings_fingerprints(
-        root, gateway, value["credential_ref"]
-    )
     if (
-        server_fingerprint != value["server_fingerprint"]
-        or account_fingerprint != value["account_fingerprint"]
+        not isinstance(value, dict)
+        or set(value) != required
+        or value.get("contract_version") != 1
+        or value.get("gateway") != gateway
+        or not isinstance(value.get("configuration_version"), int)
+        or isinstance(value.get("configuration_version"), bool)
+        or value["configuration_version"] < 1
+        or not isinstance(value.get("configuration_digest"), str)
+        or _DIGEST.fullmatch(value["configuration_digest"]) is None
+        or not isinstance(value.get("operator_identity_digest"), str)
+        or _DIGEST.fullmatch(value["operator_identity_digest"]) is None
+        or not isinstance(value.get("public"), dict)
+        or not isinstance(value.get("secrets"), dict)
+        or not all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value["secrets"].items()
+        )
     ):
-        raise ValueError("RUN_BINDING_SETTINGS_DRIFT")
-    created_at_ms = _binding_created_at_ms(root, gateway, value)
+        raise ValueError("RUN_ONE_USE_SECRET_INVALID")
+    return {
+        "configuration_version": value["configuration_version"],
+        "configuration_digest": value["configuration_digest"],
+        "operator_identity_digest": value["operator_identity_digest"],
+        "gateway_public": value["public"],
+        "gateway_secrets": value["secrets"],
+    }
+
+
+def _create_binding(
+    root: Path,
+    gateway: str,
+    *,
+    configuration_version: int,
+    configuration_digest: str,
+    public: dict[str, Any],
+    secrets: dict[str, str],
+) -> GatewayBinding:
+    server_keys = (
+        ("quote_address", "quote_port", "trading_address", "trading_port")
+        if gateway == "XTP"
+        else ("quote_server", "trading_server")
+    )
+    if not isinstance(public.get("account"), str) or any(key not in public for key in server_keys):
+        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
+    server_fingerprint = _digest(
+        {"gateway": gateway, "server": {key: public[key] for key in server_keys}}
+    )
+    account_fingerprint = _digest(
+        {"gateway": gateway, "account": public["account"]}
+    )
+    secret_identity = _digest(
+        {
+            key: _digest(item)
+            for key, item in sorted(secrets.items())
+        }
+    )
+    process_identity = (
+        f"vnpy-demo-{gateway.lower()}-configuration-{configuration_version}"
+    )
+    created_at_ms = _launch_created_at_ms(
+        root,
+        gateway,
+        configuration_version=configuration_version,
+        configuration_digest=configuration_digest,
+        server_fingerprint=server_fingerprint,
+        account_fingerprint=account_fingerprint,
+        process_identity=process_identity,
+    )
     return GatewayBinding.create(
         gateway=gateway,
-        environment=value["environment"],
-        server_fingerprint=value["server_fingerprint"],
-        account_fingerprint=value["account_fingerprint"],
-        credential_ref=value["credential_ref"],
-        process_identity=f"vnpy-demo-{gateway.lower()}",
+        environment="broker_simulation",
+        server_fingerprint=server_fingerprint,
+        account_fingerprint=account_fingerprint,
+        credential_ref=f"one-use-secret:{secret_identity}",
+        process_identity=process_identity,
         rpc_endpoint=f"127.0.0.1:{17801 if gateway == 'XTP' else 17802}",
         state_store_path=str(root / ".demo-state" / "runs" / gateway),
-        allowed_server_fingerprints=frozenset({value["server_fingerprint"]}),
-        allowed_account_fingerprints=frozenset({value["account_fingerprint"]}),
+        allowed_server_fingerprints=frozenset({server_fingerprint}),
+        allowed_account_fingerprints=frozenset({account_fingerprint}),
         created_at_ms=created_at_ms,
     )
 
 
-def _binding_created_at_ms(root: Path, gateway: str, value: dict[str, Any]) -> int:
+def _launch_created_at_ms(
+    root: Path,
+    gateway: str,
+    *,
+    configuration_version: int,
+    configuration_digest: str,
+    server_fingerprint: str,
+    account_fingerprint: str,
+    process_identity: str,
+) -> int:
     identity_digest = _digest(
         {
             "gateway": gateway,
-            "environment": value["environment"],
-            "server_fingerprint": value["server_fingerprint"],
-            "account_fingerprint": value["account_fingerprint"],
-            "credential_ref_digest": _digest(value["credential_ref"]),
-            "process_identity": f"vnpy-demo-{gateway.lower()}",
-            "rpc_endpoint": f"127.0.0.1:{17801 if gateway == 'XTP' else 17802}",
-            "state_store_path": str(root / ".demo-state" / "runs" / gateway),
+            "configuration_version": configuration_version,
+            "configuration_digest": configuration_digest,
+            "server_fingerprint": server_fingerprint,
+            "account_fingerprint": account_fingerprint,
+            "process_identity": process_identity,
         }
     )
     path = root / ".demo-state" / "runs" / gateway / "binding-identity.json"
@@ -569,16 +766,12 @@ def _binding_created_at_ms(root: Path, gateway: str, value: dict[str, Any]) -> i
         retained = _load_unique_json(path)
         if (
             not isinstance(retained, dict)
-            or set(retained) != {
-                "contract_version",
-                "identity_digest",
-                "created_at_ms",
-            }
-            or retained["contract_version"] != 1
-            or retained["identity_digest"] != identity_digest
-            or isinstance(retained["created_at_ms"], bool)
-            or not isinstance(retained["created_at_ms"], int)
-            or retained["created_at_ms"] <= 0
+            or set(retained) != {"contract_version", "identity_digest", "created_at_ms"}
+            or retained.get("contract_version") != 1
+            or retained.get("identity_digest") != identity_digest
+            or not isinstance(retained.get("created_at_ms"), int)
+            or isinstance(retained.get("created_at_ms"), bool)
+            or retained["created_at_ms"] < 1
         ):
             raise ValueError("RUN_BINDING_IDENTITY_DRIFT")
         return retained["created_at_ms"]
@@ -594,39 +787,7 @@ def _binding_created_at_ms(root: Path, gateway: str, value: dict[str, Any]) -> i
     return created_at_ms
 
 
-def _settings_fingerprints(
-    root: Path, gateway: str, credential_ref: str
-) -> tuple[str, str]:
-    settings_path = Path(credential_ref)
-    if not settings_path.is_absolute():
-        settings_path = root / settings_path
-    settings_path = settings_path.resolve(strict=True)
-    settings = _load_unique_json(settings_path)
-    if not isinstance(settings, dict):
-        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
-    account_key = "账号"
-    server_keys = (
-        ("行情地址", "行情端口", "交易地址", "交易端口")
-        if gateway == "XTP"
-        else ("行情服务器", "交易服务器")
-    )
-    if account_key not in settings or any(key not in settings for key in server_keys):
-        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
-    account = settings[account_key]
-    if not isinstance(account, str) or not account.strip():
-        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
-    server_identity = {key: settings[key] for key in server_keys}
-    return _digest(server_identity), _digest({account_key: account})
-
-
-def _connect_gateway(root: Path, gateway: str, credential_ref: str) -> MainEngine:
-    settings_path = Path(credential_ref)
-    if not settings_path.is_absolute():
-        settings_path = root / settings_path
-    settings_path = settings_path.resolve(strict=True)
-    value = _load_unique_json(settings_path)
-    if not isinstance(value, dict):
-        raise ValueError("RUN_GATEWAY_SETTINGS_INVALID")
+def _connect_gateway(gateway: str, settings: Mapping[str, str | int]) -> MainEngine:
     module_name, class_names = (
         ("vnpy_xtp", ("XtpGateway",))
         if gateway == "XTP"
@@ -640,8 +801,15 @@ def _connect_gateway(root: Path, gateway: str, credential_ref: str) -> MainEngin
         raise RuntimeError("RUN_GATEWAY_CLASS_UNAVAILABLE")
     main_engine = MainEngine(EventEngine())
     main_engine.add_gateway(gateway_class)
-    main_engine.connect(value, gateway)
+    main_engine.connect(dict(settings), gateway)
     return main_engine
+
+
+def _disconnect_gateway(main_engine: Any, gateway: str) -> None:
+    close_gateway = getattr(main_engine, "close_gateway", None)
+    if not callable(close_gateway):
+        raise RunOperationError("RUN_GATEWAY_DISCONNECT_UNAVAILABLE")
+    close_gateway(gateway)
 
 
 def _address(value: str) -> tuple[str, int]:

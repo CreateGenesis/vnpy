@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from base64 import b64encode
+from base64 import b64decode, b64encode
 from hashlib import sha256
 import hmac
 import json
@@ -22,7 +22,9 @@ class SupervisorIpcError(RuntimeError):
     pass
 
 
-_OPERATIONS = frozenset({"service_control", "health", "secret_lease"})
+_OPERATIONS = frozenset(
+    {"service_control", "service_secret_control", "health", "secret_lease"}
+)
 _SERVICE_ACTIONS = frozenset({"start", "stop", "restart"})
 _SERVICES = frozenset(
     {"web", "research", "model_xtp", "model_tora", "run_xtp", "run_tora", "rqdata_fetcher"}
@@ -110,6 +112,18 @@ class AuthenticatedSupervisorIpc:
                 or isinstance(payload.get("expected_revision"), bool)
             ):
                 raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED")
+        elif operation == "service_secret_control":
+            secret = payload.get("secret_base64")
+            if (
+                set(payload) != {"service", "action", "expected_revision", "secret_base64"}
+                or payload.get("service") not in {"run_xtp", "run_tora", "rqdata_fetcher"}
+                or payload.get("action") not in {"start", "restart"}
+                or not isinstance(payload.get("expected_revision"), int)
+                or isinstance(payload.get("expected_revision"), bool)
+                or not isinstance(secret, str)
+                or not 1 <= len(secret) <= 87_384
+            ):
+                raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED")
         elif operation == "health":
             if set(payload) != {"service"} or payload.get("service") not in _SERVICES:
                 raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED")
@@ -191,6 +205,12 @@ class SupervisorController(Protocol):
 
     def reconcile(self, service: ServiceName) -> dict[str, Any]: ...
 
+    def handle_secret(
+        self,
+        command: dict[str, Any],
+        secret_payload: bytes,
+    ) -> dict[str, Any]: ...
+
 
 class SupervisorIpcServer(ThreadingTCPServer):
     """Bounded loopback RPC server owned by the trusted Supervisor process."""
@@ -217,6 +237,22 @@ class SupervisorIpcServer(ThreadingTCPServer):
     def dispatch(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         if operation == "service_control":
             return self.supervisor.handle(payload)
+        if operation == "service_secret_control":
+            encoded = payload["secret_base64"]
+            try:
+                secret = b64decode(encoded, validate=True)
+            except ValueError as exc:
+                raise SupervisorIpcError("SUPERVISOR_SECRET_PAYLOAD_INVALID") from exc
+            if not secret or len(secret) > 65_536:
+                raise SupervisorIpcError("SUPERVISOR_SECRET_PAYLOAD_INVALID")
+            lease_id = self.secret_leases.issue(
+                secret,
+                audience=payload["service"],
+                ttl_ms=10_000,
+            )
+            consumed = self.secret_leases.consume(lease_id, audience=payload["service"])
+            command = {key: payload[key] for key in ("service", "action", "expected_revision")}
+            return self.supervisor.handle_secret(command, consumed)
         if operation == "health":
             try:
                 service = ServiceName(payload["service"])
@@ -320,6 +356,18 @@ class SupervisorIpcClient:
 
     def handle(self, command: dict[str, Any]) -> dict[str, Any]:
         return self.request("service_control", command)
+
+    def handle_with_secret(
+        self,
+        command: dict[str, Any],
+        secret_payload: bytes,
+    ) -> dict[str, Any]:
+        if not secret_payload or len(secret_payload) > 65_536:
+            raise SupervisorIpcError("SUPERVISOR_SECRET_PAYLOAD_INVALID")
+        return self.request(
+            "service_secret_control",
+            {**command, "secret_base64": b64encode(secret_payload).decode("ascii")},
+        )
 
     def reconcile(self, service: ServiceName) -> dict[str, Any]:
         return self.request("health", {"service": service.value})

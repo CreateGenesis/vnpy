@@ -37,6 +37,15 @@ class FakeRuntime:
         self.events.append(("spawn", identity.pid))
         return identity
 
+    def spawn_with_secret(
+        self,
+        spec: ServiceSpec,
+        arguments: tuple[str, ...],
+        secret_payload: bytes,
+    ) -> ProcessIdentity:
+        assert secret_payload == b"one-use-settings"
+        return self.spawn(spec, arguments)
+
     def inspect(self, pid: int) -> ProcessIdentity | None:
         return self.identities.get(pid)
 
@@ -150,3 +159,31 @@ def test_windows_local_runtime_terminates_the_verified_process_tree(
 
     assert commands == [["taskkill.exe", "/PID", "4321", "/T", "/F"]]
     assert 4321 not in runtime._children
+
+
+def test_secret_start_is_limited_to_fixed_secret_consumers(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    run_spec = ServiceSpec(
+        service=ServiceName.RUN_XTP,
+        executable=Path("C:/Python313/python.exe"),
+        executable_digest=digest("python"),
+        argument_template=("-m", "vnpy.demo_web.run_service", "--gateway", "XTP"),
+        endpoint_template="tcp://127.0.0.1:8784",
+        configuration_version=1,
+    )
+    service = FixedServiceSupervisor(
+        tmp_path,
+        specs={ServiceName.RUN_XTP: run_spec},
+        runtime=runtime,
+    )
+
+    started = service.handle_secret(
+        {"service": "run_xtp", "action": "start", "expected_revision": 0},
+        b"one-use-settings",
+    )
+    assert started["state"] == "ready"
+    with pytest.raises(SupervisorError, match="SUPERVISOR_SECRET_SERVICE_DENIED"):
+        service.handle_secret(
+            {"service": "web", "action": "start", "expected_revision": 1},
+            b"one-use-settings",
+        )

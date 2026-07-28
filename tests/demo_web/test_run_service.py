@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from base64 import b64encode
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -8,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from vnpy.agent_bridge.native_bridge import NativeModelBridge
-from vnpy.demo_web.run_service import BrokerSimulationRunHost, _settings_fingerprints
+from vnpy.demo_web.run_service import BrokerSimulationRunHost, _consume_one_use_secret
 from vnpy.event import Event
 from vnpy.trader.constant import Exchange
 from vnpy.trader.event import EVENT_TICK
@@ -76,6 +78,8 @@ class FakeMainEngine:
     def __init__(self) -> None:
         self.event_engine = FakeEventEngine()
         self.submissions: list[tuple[Any, str]] = []
+        self.connections: list[tuple[dict[str, str | int], str]] = []
+        self.closed_gateways: list[str] = []
 
     def get_all_accounts(self) -> list[Account]:
         return [Account()]
@@ -96,6 +100,12 @@ class FakeMainEngine:
         self.submissions.append((request, gateway_name))
         return f"{gateway_name}.simulation-{len(self.submissions)}"
 
+    def connect(self, settings: dict[str, str | int], gateway_name: str) -> None:
+        self.connections.append((settings, gateway_name))
+
+    def close_gateway(self, gateway_name: str) -> None:
+        self.closed_gateways.append(gateway_name)
+
 
 def test_run_host_owns_prepare_start_pause_and_stop_without_agent_calls(
     tmp_path: Path,
@@ -103,24 +113,14 @@ def test_run_host_owns_prepare_start_pause_and_stop_without_agent_calls(
     install_state(tmp_path)
     main_engine = FakeMainEngine()
     native = FakeNativeBridge()
-    host = BrokerSimulationRunHost(
-        tmp_path,
-        "XTP",
-        main_engine=main_engine,
-        model_bridge=NativeModelBridge(native=native),
-    )
+    host = make_host(tmp_path, main_engine=main_engine, native=native)
     campaign_id = "b53bc59c-c626-4f16-8a3e-a3185c7dad23"
     campaign_digest = digest("campaign")
-    common = {
-        "contract_version": 1,
-        "gateway": "XTP",
-        "run_digest": host.run_digest,
-    }
 
     prepared = host.handle(
         "run.prepare_campaign.v1",
         {
-            **common,
+            **base(host),
             "campaign_id": campaign_id,
             "campaign_digest": campaign_digest,
             "candidate_digest": digest("candidate"),
@@ -130,25 +130,25 @@ def test_run_host_owns_prepare_start_pause_and_stop_without_agent_calls(
     started = host.handle(
         "run.start_campaign.v1",
         {
-            **common,
+            **base(host),
             "campaign_id": campaign_id,
             "campaign_digest": campaign_digest,
             "idempotency_key": "start-campaign-0001",
         },
     )
     main_engine.event_engine.emit(EVENT_TICK, tick())
-    status = host.handle("run.status.v1", common)
+    status = host.handle("run.status.v1", base(host))
     paused = host.handle(
         "run.pause_campaign.v1",
         {
-            **common,
+            **base(host),
             "campaign_digest": campaign_digest,
             "idempotency_key": "pause-campaign-0001",
         },
     )
     stopped = host.handle(
         "run.emergency_stop.v1",
-        {**common, "idempotency_key": "stop-campaign-0001"},
+        {**base(host), "idempotency_key": "stop-campaign-0001"},
     )
 
     assert prepared["state"] == "prepared"
@@ -180,60 +180,84 @@ def test_run_host_owns_prepare_start_pause_and_stop_without_agent_calls(
     host.close()
 
 
-def test_run_host_rejects_gateway_settings_that_drift_from_approved_binding(
+def test_one_use_gateway_secret_is_consumed_without_plaintext_persistence(
     tmp_path: Path,
 ) -> None:
-    install_state(tmp_path)
-    settings_path = tmp_path / ".demo-secrets" / "xtp-settings.json"
-    settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    settings["交易地址"] = "changed.example.invalid"
-    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    install_state(tmp_path, candidate=False)
+    payload = one_use_payload()
+    os.environ["AUTO_TRADE_ONE_USE_SECRET"] = b64encode(
+        json.dumps(payload).encode("utf-8")
+    ).decode("ascii")
 
-    try:
-        BrokerSimulationRunHost(
-            tmp_path,
-            "XTP",
-            main_engine=FakeMainEngine(),
-            model_bridge=NativeModelBridge(native=FakeNativeBridge()),
-        )
-    except ValueError as exc:
-        assert str(exc) == "RUN_BINDING_SETTINGS_DRIFT"
-    else:
-        raise AssertionError("gateway settings drift was accepted")
+    launch = _consume_one_use_secret("XTP")
+    host = BrokerSimulationRunHost(
+        tmp_path,
+        "XTP",
+        **launch,
+        main_engine=FakeMainEngine(),
+        model_bridge=NativeModelBridge(native=FakeNativeBridge()),
+    )
+
+    assert "AUTO_TRADE_ONE_USE_SECRET" not in os.environ
+    assert host.handle("run.gateway_health.v1", base(host))["state"] == "connected"
+    retained = b"\n".join(
+        path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    )
+    assert b"write-only-password" not in retained
+    assert b"write-only-auth-code" not in retained
+    assert not (tmp_path / ".demo-secrets" / "gateway-bindings.json").exists()
+    assert not (tmp_path / ".demo-secrets" / "xtp-settings.json").exists()
+    host.close()
 
 
-def test_gateway_fingerprints_use_exact_installed_plugin_field_names(tmp_path: Path) -> None:
-    secrets = tmp_path / ".demo-secrets"
-    secrets.mkdir()
-    cases = {
-        "XTP": {
-            "账号": "xtp-simulation",
-            "行情地址": "quote.simulation.invalid",
-            "行情端口": 10001,
-            "交易地址": "trade.simulation.invalid",
-            "交易端口": 10002,
+def test_gateway_connects_without_candidate_and_campaign_prepare_fails_closed(
+    tmp_path: Path,
+) -> None:
+    install_state(tmp_path, candidate=False)
+    host = make_host(tmp_path)
+
+    health = host.handle("run.gateway_health.v1", base(host))
+    prepared = host.handle(
+        "run.prepare_campaign.v1",
+        {
+            **base(host),
+            "campaign_id": "b53bc59c-c626-4f16-8a3e-a3185c7dad23",
+            "campaign_digest": digest("campaign"),
+            "candidate_digest": digest("candidate"),
+            "idempotency_key": "prepare-campaign-0001",
         },
-        "TORA": {
-            "账号": "tora-simulation",
-            "行情服务器": "tcp://quote.simulation.invalid:20001",
-            "交易服务器": "tcp://trade.simulation.invalid:20002",
-        },
-    }
-    server_keys = {
-        "XTP": ("行情地址", "行情端口", "交易地址", "交易端口"),
-        "TORA": ("行情服务器", "交易服务器"),
-    }
+    )
 
-    for gateway, settings in cases.items():
-        relative = f".demo-secrets/{gateway.lower()}-settings.json"
-        (tmp_path / relative).write_text(
-            json.dumps(settings, ensure_ascii=False), encoding="utf-8"
-        )
-        server, account = _settings_fingerprints(tmp_path, gateway, relative)
-        assert server == payload_digest(
-            {key: settings[key] for key in server_keys[gateway]}
-        )
-        assert account == payload_digest({"账号": settings["账号"]})
+    assert health["state"] == "connected"
+    assert prepared["state"] == "blocked"
+    assert prepared["data"] == {"error_code": "RUN_CANDIDATE_NOT_READY"}
+    host.close()
+
+
+def test_gateway_reconnect_and_drain_shutdown_are_bounded_and_do_not_resend(
+    tmp_path: Path,
+) -> None:
+    install_state(tmp_path, candidate=False)
+    main_engine = FakeMainEngine()
+    host = make_host(tmp_path, main_engine=main_engine)
+
+    reconnected = host.handle(
+        "run.reconnect.v1",
+        {**base(host), "idempotency_key": "reconnect-gateway-0001"},
+    )
+    drained = host.handle(
+        "run.drain_shutdown.v1",
+        {**base(host), "idempotency_key": "drain-shutdown-0001"},
+    )
+
+    assert reconnected["state"] == "connected"
+    assert main_engine.closed_gateways == ["XTP", "XTP"]
+    assert len(main_engine.connections) == 1
+    assert main_engine.submissions == []
+    assert drained["state"] == "stopped"
+    assert drained["data"]["reconciliation_state"] == "complete"
+    assert host.shutdown_requested is True
+    host.close()
 
 
 def test_active_run_restores_model_loop_after_host_restart(tmp_path: Path) -> None:
@@ -242,21 +266,11 @@ def test_active_run_restores_model_loop_after_host_restart(tmp_path: Path) -> No
     campaign_digest = digest("campaign")
 
     first_engine = FakeMainEngine()
-    first_host = BrokerSimulationRunHost(
-        tmp_path,
-        "XTP",
-        main_engine=first_engine,
-        model_bridge=NativeModelBridge(native=FakeNativeBridge()),
-    )
-    common = {
-        "contract_version": 1,
-        "gateway": "XTP",
-        "run_digest": first_host.run_digest,
-    }
+    first_host = make_host(tmp_path, main_engine=first_engine)
     first_host.handle(
         "run.prepare_campaign.v1",
         {
-            **common,
+            **base(first_host),
             "campaign_id": campaign_id,
             "campaign_digest": campaign_digest,
             "candidate_digest": digest("candidate"),
@@ -266,7 +280,7 @@ def test_active_run_restores_model_loop_after_host_restart(tmp_path: Path) -> No
     first_host.handle(
         "run.start_campaign.v1",
         {
-            **common,
+            **base(first_host),
             "campaign_id": campaign_id,
             "campaign_digest": campaign_digest,
             "idempotency_key": "start-campaign-0001",
@@ -276,14 +290,13 @@ def test_active_run_restores_model_loop_after_host_restart(tmp_path: Path) -> No
 
     second_engine = FakeMainEngine()
     second_native = FakeNativeBridge()
-    second_host = BrokerSimulationRunHost(
+    second_host = make_host(
         tmp_path,
-        "XTP",
         main_engine=second_engine,
-        model_bridge=NativeModelBridge(native=second_native),
+        native=second_native,
     )
     second_engine.event_engine.emit(EVENT_TICK, tick())
-    status = second_host.handle("run.status.v1", common)
+    status = second_host.handle("run.status.v1", base(second_host))
 
     assert len(second_native.inputs) == 1
     assert status["data"]["model_state"] == "running"
@@ -292,12 +305,70 @@ def test_active_run_restores_model_loop_after_host_restart(tmp_path: Path) -> No
     second_host.handle(
         "run.pause_campaign.v1",
         {
-            **common,
+            **base(second_host),
             "campaign_digest": campaign_digest,
             "idempotency_key": "pause-campaign-0001",
         },
     )
     second_host.close()
+
+
+def make_host(
+    root: Path,
+    *,
+    main_engine: FakeMainEngine | None = None,
+    native: FakeNativeBridge | None = None,
+) -> BrokerSimulationRunHost:
+    return BrokerSimulationRunHost(
+        root,
+        "XTP",
+        **launch_settings(),
+        main_engine=main_engine or FakeMainEngine(),
+        model_bridge=NativeModelBridge(native=native or FakeNativeBridge()),
+    )
+
+
+def base(host: BrokerSimulationRunHost) -> dict[str, Any]:
+    return {
+        "contract_version": 1,
+        "gateway": "XTP",
+        "run_digest": host.run_digest,
+    }
+
+
+def launch_settings() -> dict[str, Any]:
+    payload = one_use_payload()
+    return {
+        "configuration_version": payload["configuration_version"],
+        "configuration_digest": payload["configuration_digest"],
+        "operator_identity_digest": payload["operator_identity_digest"],
+        "gateway_public": payload["public"],
+        "gateway_secrets": payload["secrets"],
+    }
+
+
+def one_use_payload() -> dict[str, Any]:
+    return {
+        "contract_version": 1,
+        "gateway": "XTP",
+        "configuration_version": 1,
+        "configuration_digest": digest("configuration"),
+        "operator_identity_digest": digest("operator"),
+        "public": {
+            "account": "simulation-account",
+            "client_id": 7,
+            "quote_address": "quote.simulation.invalid",
+            "quote_port": 10001,
+            "trading_address": "trade.simulation.invalid",
+            "trading_port": 10002,
+            "quote_protocol": "TCP",
+            "log_level": "INFO",
+        },
+        "secrets": {
+            "password": "write-only-password",
+            "authorization_code": "write-only-auth-code",
+        },
+    }
 
 
 def tick() -> TickData:
@@ -320,12 +391,10 @@ def tick() -> TickData:
     )
 
 
-def install_state(root: Path) -> None:
+def install_state(root: Path, *, candidate: bool = True) -> None:
     state = root / ".demo-state"
-    secrets = root / ".demo-secrets"
     state.mkdir()
-    secrets.mkdir()
-    candidate = {
+    candidate_value = {
         "contract_version": 1,
         "ready": True,
         "candidate_digest": digest("candidate"),
@@ -343,42 +412,7 @@ def install_state(root: Path) -> None:
         ],
         "lifecycle_revision": 1,
     }
-    settings = {
-        "账号": "simulation-account",
-        "行情地址": "quote.simulation.invalid",
-        "行情端口": 10001,
-        "交易地址": "trade.simulation.invalid",
-        "交易端口": 10002,
-    }
-    bindings = [
-        {
-            "name": "XTP",
-            "environment": "broker_simulation",
-            "server_fingerprint": payload_digest(
-                {
-                    "行情地址": settings["行情地址"],
-                    "行情端口": settings["行情端口"],
-                    "交易地址": settings["交易地址"],
-                    "交易端口": settings["交易端口"],
-                }
-            ),
-            "account_fingerprint": payload_digest({"账号": settings["账号"]}),
-            "credential_ref": ".demo-secrets/xtp-settings.json",
-        }
-    ]
-    operator = {"contract_version": 1, "operator_identity_digest": digest("operator")}
-    (state / "ready-candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
-    (secrets / "gateway-bindings.json").write_text(json.dumps(bindings), encoding="utf-8")
-    (secrets / "operator.json").write_text(json.dumps(operator), encoding="utf-8")
-    (secrets / "xtp-settings.json").write_text(json.dumps(settings), encoding="utf-8")
-
-
-def payload_digest(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=True,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return f"sha256:{sha256(encoded).hexdigest()}"
+    if candidate:
+        (state / "ready-candidate.json").write_text(
+            json.dumps(candidate_value), encoding="utf-8"
+        )

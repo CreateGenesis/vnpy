@@ -98,6 +98,23 @@ class BrokerSimulationRunClient:
     def read_status(self) -> dict[str, Any]:
         return self._send("run.status.v1", {})
 
+    def gateway_health(self) -> dict[str, Any]:
+        return self._send("run.gateway_health.v1", {})
+
+    def reconnect(self, idempotency_key: str) -> dict[str, Any]:
+        _require_idempotency_key(idempotency_key)
+        return self._send(
+            "run.reconnect.v1",
+            {"idempotency_key": idempotency_key},
+        )
+
+    def drain_shutdown(self, idempotency_key: str) -> dict[str, Any]:
+        _require_idempotency_key(idempotency_key)
+        return self._send(
+            "run.drain_shutdown.v1",
+            {"idempotency_key": idempotency_key},
+        )
+
     def read_evidence(self, campaign_digest: str) -> dict[str, Any]:
         _require_digest(campaign_digest, "RUN_CLIENT_CAMPAIGN_INVALID")
         return self._send("run.evidence.v1", {"campaign_digest": campaign_digest})
