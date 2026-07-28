@@ -28,6 +28,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .security import BootstrapSessionManager
+
 
 _SESSION_COOKIE = "auto_trade_host_session"
 _CSRF_PLACEHOLDER = "__AUTO_TRADE_CSRF_TOKEN__"
@@ -72,6 +74,7 @@ _FORBIDDEN_PUBLIC_KEYS = frozenset(
 )
 _SAFE_SECRET_STATUS_SUFFIXES = ("_configured", "_fingerprint", "_status")
 _SECRET_MATERIAL_SUFFIXES = ("_api_key", "_credential", "_password", "_secret", "_token")
+_ALLOWED_PUBLIC_TOKEN_KEYS = frozenset({"csrf_token"})
 
 
 @dataclass(frozen=True)
@@ -176,6 +179,12 @@ class SideMasterDecisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=16, max_length=128)
 
 
+class BootstrapExchangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    fragment_token: str = Field(min_length=32, max_length=256)
+
+
 class _ResponseRedactionError(RuntimeError):
     pass
 
@@ -184,6 +193,8 @@ def create_demo_app(
     config: DemoWebConfig,
     backend: DemoWebBackend,
     guidance: DemoGuidanceBackend | None = None,
+    *,
+    security: BootstrapSessionManager | None = None,
 ) -> FastAPI:
     """Create the exact allowlisted local API surface."""
 
@@ -215,7 +226,12 @@ def create_demo_app(
         request: Request,
         host_session: str | None = Cookie(default=None, alias=_SESSION_COOKIE),
     ) -> None:
-        if host_session is None or not compare_digest(host_session, config.session_token):
+        authenticated = (
+            security.validate_session(host_session)
+            if security is not None
+            else host_session is not None and compare_digest(host_session, config.session_token)
+        )
+        if not authenticated:
             raise HTTPException(status_code=401, detail="HOST_SESSION_REQUIRED")
         origin = request.headers.get("origin")
         if origin is not None and origin != config.allowed_origin:
@@ -236,10 +252,8 @@ def create_demo_app(
 
     @app.get("/", response_class=HTMLResponse)
     def get_dashboard() -> HTMLResponse:
-        content = index_template.replace(
-            _CSRF_PLACEHOLDER,
-            escape(config.csrf_token, quote=True),
-        )
+        csrf = "" if security is not None else config.csrf_token
+        content = index_template.replace(_CSRF_PLACEHOLDER, escape(csrf, quote=True))
         response = HTMLResponse(
             content=content,
             headers={
@@ -247,14 +261,46 @@ def create_demo_app(
                 "Content-Security-Policy": _CONTENT_SECURITY_POLICY,
             },
         )
-        response.set_cookie(
-            key=_SESSION_COOKIE,
-            value=config.session_token,
-            httponly=True,
-            samesite="strict",
-            path="/",
-        )
+        if security is None:
+            response.set_cookie(
+                key=_SESSION_COOKIE,
+                value=config.session_token,
+                httponly=True,
+                samesite="strict",
+                path="/",
+            )
         return response
+
+    if security is not None:
+
+        @app.post("/api/v1/bootstrap/exchange")
+        def exchange_bootstrap(
+            command: BootstrapExchangeRequest,
+            request: Request,
+        ) -> JSONResponse:
+            result = security.exchange(
+                command.fragment_token,
+                origin=request.headers.get("origin", ""),
+            )
+            if not result.accepted:
+                status = 403 if result.code in {"SAME_ORIGIN_REQUIRED", "BOOTSTRAP_OPERATOR_MISMATCH"} else 409
+                return _error_response(status, result.code)
+            response = _invoke(
+                lambda: {"csrf_token": result.csrf_token},
+                accepted=False,
+            )
+            response.set_cookie(
+                key=_SESSION_COOKIE,
+                value=str(result.session_token),
+                httponly=True,
+                samesite="strict",
+                path="/",
+            )
+            return response
+
+        @app.get("/api/v1/operator", dependencies=read_dependencies)
+        def get_current_operator() -> JSONResponse:
+            return _invoke(security.operator_projection, accepted=False)
 
     @app.get("/api/v1/readiness", dependencies=read_dependencies)
     def get_readiness() -> JSONResponse:
@@ -409,6 +455,8 @@ def _is_nonnegative_int(value: Any) -> bool:
 
 def _is_forbidden_public_key(key: str) -> bool:
     normalized = key.casefold()
+    if normalized in _ALLOWED_PUBLIC_TOKEN_KEYS:
+        return False
     if normalized in _FORBIDDEN_PUBLIC_KEYS:
         return True
     if normalized.endswith(_SAFE_SECRET_STATUS_SUFFIXES):

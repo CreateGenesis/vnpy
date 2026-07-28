@@ -80,16 +80,19 @@ class ModelRouteSection(StrictModel):
 class XtpSection(StrictModel):
     account: str = Field(min_length=1, max_length=128)
     client_id: int = Field(ge=1, le=255)
-    software_key: str = Field(min_length=1, max_length=256)
     quote_address: str = Field(min_length=1, max_length=512)
     quote_port: int = Field(ge=1, le=65_535)
     trading_address: str = Field(min_length=1, max_length=512)
     trading_port: int = Field(ge=1, le=65_535)
+    quote_protocol: Literal["TCP", "UDP"] = "TCP"
+    log_level: Literal["FATAL", "ERROR", "WARNING", "INFO", "DEBUG", "TRACE"] = "INFO"
 
 
 class ToraSection(StrictModel):
     account: str = Field(min_length=1, max_length=128)
-    user_product_info: str = Field(min_length=1, max_length=128)
+    product_id: str = Field(min_length=1, max_length=128)
+    account_type: Literal["用户代码", "资金账号"] = "资金账号"
+    address_type: Literal["前置地址", "FENS地址"] = "前置地址"
     quote_server: str = Field(min_length=1, max_length=512)
     trading_server: str = Field(min_length=1, max_length=512)
 
