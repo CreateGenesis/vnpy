@@ -33,6 +33,10 @@ dist
 .agent-state/
 .demo-state/
 .demo-secrets/
+.operations-state/
+.model-state/
+.data-snapshots/
+.model-lab-output/
 web/demo-ui/node_modules/
 web/demo-ui/playwright-report/
 web/demo-ui/test-results/
