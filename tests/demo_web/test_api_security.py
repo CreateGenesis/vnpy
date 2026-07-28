@@ -158,7 +158,8 @@ def test_root_bootstraps_same_origin_session_and_serves_built_assets() -> None:
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Auto Trade Investor Broker Simulation" in response.text
+    assert '<html lang="zh-CN">' in response.text
+    assert "Auto Trade 模拟盘控制台" in response.text
     assert "__AUTO_TRADE_CSRF_TOKEN__" not in response.text
     assert CSRF_TOKEN in response.text
     assert response.headers["cache-control"] == "no-store"

@@ -104,10 +104,10 @@ const renderPanel = (api: SideMasterApi, available = true) => render(
 );
 
 const send = (content: string): void => {
-  fireEvent.change(screen.getByLabelText("Research message"), {
+  fireEvent.change(screen.getByLabelText("研究消息"), {
     target: { value: content },
   });
-  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
 };
 
 
@@ -116,12 +116,12 @@ test("renders ordinary conversation without creating a proposal", async () => {
   renderPanel(api);
 
   expect(screen.getByText("Side Master")).toBeInTheDocument();
-  expect(screen.getByText("Ready")).toBeInTheDocument();
+  expect(screen.getByText("可以对话")).toBeInTheDocument();
   send("Keep the current objective");
 
   expect(await screen.findByText("Continue the current research direction.")).toBeInTheDocument();
   expect(screen.getByText("Keep the current objective")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Confirm proposal" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "确认提案" })).not.toBeInTheDocument();
   expect(api.sendSideMasterMessage).toHaveBeenCalledWith(
     "side-session-1",
     "research-mission-1",
@@ -138,10 +138,10 @@ test("requires explicit confirmation and shows future-research-only guidance", a
   expect(await screen.findByText(proposal.interpretation)).toBeInTheDocument();
   expect(screen.getByText(proposal.proposed_guidance)).toBeInTheDocument();
   expect(api.decideSideMasterProposal).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Confirm proposal" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认提案" }));
 
-  expect(await screen.findByText("Confirmed for future research")).toBeInTheDocument();
-  expect(screen.getByText("Active campaign unchanged")).toBeInTheDocument();
+  expect(await screen.findByText("已确认用于后续研究")).toBeInTheDocument();
+  expect(screen.getByText("当前模拟盘保持不变")).toBeInTheDocument();
   expect(api.decideSideMasterProposal).toHaveBeenCalledWith(
     proposal.proposal_id,
     proposal.proposal_digest,
@@ -156,10 +156,10 @@ test("records proposal rejection without creating guidance", async () => {
   send("Change the next research objective");
 
   await screen.findByText(proposal.interpretation);
-  fireEvent.click(screen.getByRole("button", { name: "Reject proposal" }));
+  fireEvent.click(screen.getByRole("button", { name: "拒绝提案" }));
 
-  expect(await screen.findByText("Proposal rejected")).toBeInTheDocument();
-  expect(screen.queryByText("Confirmed for future research")).not.toBeInTheDocument();
+  expect(await screen.findByText("提案已拒绝")).toBeInTheDocument();
+  expect(screen.queryByText("已确认用于后续研究")).not.toBeInTheDocument();
   expect(api.decideSideMasterProposal).toHaveBeenCalledWith(
     proposal.proposal_id,
     proposal.proposal_digest,
@@ -179,10 +179,10 @@ test("shows uncertain provider outcome with no retry or proposal effect", async 
   renderPanel(api);
   send("Explore a different factor family");
 
-  expect(await screen.findByRole("status")).toHaveTextContent("Provider outcome uncertain");
-  expect(screen.getByText("No guidance was created")).toBeInTheDocument();
+  expect(await screen.findByRole("status")).toHaveTextContent("模型结果待核实");
+  expect(screen.getByText("没有创建研究指引")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Confirm proposal" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "确认提案" })).not.toBeInTheDocument();
   expect(api.decideSideMasterProposal).not.toHaveBeenCalled();
 });
 
@@ -194,9 +194,9 @@ test("network retry reuses the idempotency key and does not duplicate the user t
   renderPanel(api);
   send("Retry this exact turn");
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("Side Master unavailable");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Side Master 暂不可用");
   const firstKey = vi.mocked(api.sendSideMasterMessage).mock.calls[0][3];
-  fireEvent.click(screen.getByRole("button", { name: "Retry message" }));
+  fireEvent.click(screen.getByRole("button", { name: "重试消息" }));
 
   expect(await screen.findByText("Recovered response")).toBeInTheDocument();
   expect(vi.mocked(api.sendSideMasterMessage).mock.calls[1][3]).toBe(firstKey);
@@ -209,9 +209,9 @@ test("shows backend unavailability and blocks conversation input", () => {
   const api = apiMock();
   renderPanel(api, false);
 
-  expect(screen.getAllByText("Side Master unavailable")).toHaveLength(2);
-  expect(screen.getByText("Research conversation service is not configured")).toBeInTheDocument();
-  expect(screen.getByLabelText("Research message")).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  expect(screen.getAllByText("Side Master 暂不可用")).toHaveLength(2);
+  expect(screen.getByText("请先启动研究服务")).toBeInTheDocument();
+  expect(screen.getByLabelText("研究消息")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发送消息" })).toBeDisabled();
   expect(api.sendSideMasterMessage).not.toHaveBeenCalled();
 });

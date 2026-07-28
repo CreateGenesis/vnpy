@@ -229,10 +229,21 @@ async function installOperationsBackend(page: Page) {
   return { posts, puts, state };
 }
 
+async function establishTestSession(page: Page): Promise<void> {
+  await page.locator('meta[name="auto-trade-csrf"]').evaluate((element) => {
+    element.setAttribute("content", "operations-csrf-token-0123456789abcdef0123456789abcdef");
+  });
+}
+
 
 test("settings draft, tests, activation, and port handoff are operable", async ({ page }) => {
   const backend = await installOperationsBackend(page);
   await page.goto("/");
+  await establishTestSession(page);
+  const navigationFits = await page.getByRole("tablist", { name: "工作视图" }).evaluate(
+    (element) => element.scrollWidth <= element.clientWidth,
+  );
+  expect(navigationFits).toBe(true);
   await page.getByRole("tab", { name: "设置" }).click();
 
   await page.getByLabel("Web 端口").fill("8877");
@@ -244,6 +255,8 @@ test("settings draft, tests, activation, and port handoff are operable", async (
 
   await page.getByRole("button", { name: "测试端口" }).click();
   await expect(page.getByText("端口测试通过")).toBeVisible();
+  await page.getByRole("button", { name: "测试 RQData" }).click();
+  await expect(page.getByText("RQData测试通过")).toBeVisible();
   await page.getByRole("button", { name: "激活配置" }).click();
   const handoff = page.getByRole("link", { name: "打开新控制台地址" });
   await expect(handoff).toHaveAttribute("href", "http://127.0.0.1:8877");
@@ -254,6 +267,7 @@ test("settings draft, tests, activation, and port handoff are operable", async (
 test("independent gateways, selected campaign, research, model pipeline, and restart work", async ({ page }) => {
   const backend = await installOperationsBackend(page);
   await page.goto("/");
+  await establishTestSession(page);
 
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("button", { name: "启动研究服务" }).click();
@@ -274,9 +288,10 @@ test("independent gateways, selected campaign, research, model pipeline, and res
   await expect(page.getByText("等待调度")).toBeVisible();
 
   await page.getByRole("tab", { name: "模型" }).click();
-  await expect(page.getByText("Lasso")).toBeVisible();
-  await expect(page.getByText("LightGBM")).toBeVisible();
-  await expect(page.getByText("64%")).toBeVisible();
+  const modelPipeline = page.getByRole("region", { name: "模型流水线" });
+  await expect(modelPipeline.getByText("Lasso", { exact: true })).toBeVisible();
+  await expect(modelPipeline.getByText("LightGBM", { exact: true })).toBeVisible();
+  await expect(modelPipeline.getByText("64%", { exact: true })).toBeVisible();
 
   await page.reload();
   await page.getByRole("tab", { name: "模拟盘" }).click();

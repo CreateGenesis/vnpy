@@ -14,6 +14,7 @@ import type {
   SideMasterApi,
   SideMasterProposal,
 } from "../api";
+import { stateLabel } from "../i18n";
 
 
 interface SideMasterPanelProps {
@@ -46,11 +47,11 @@ const replyText = (body: unknown): string => {
   return JSON.stringify(body);
 };
 
-const stateLabel = (state: ChatState): string => {
-  if (state === "sending") return "Waiting for Side Master";
-  if (state === "uncertain") return "Provider outcome uncertain";
-  if (state === "unavailable") return "Side Master unavailable";
-  return "Ready";
+const chatStateLabel = (state: ChatState): string => {
+  if (state === "sending") return "等待 Side Master 回复";
+  if (state === "uncertain") return "模型结果待核实";
+  if (state === "unavailable") return "Side Master 暂不可用";
+  return "可以对话";
 };
 
 export function SideMasterPanel({ api, available, sessionId, missionId }: SideMasterPanelProps) {
@@ -159,13 +160,13 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
     <section className="side-master-section" aria-labelledby="side-master-heading">
       <div className="side-master-layout">
         <div className="side-master-intro">
-          <span className="eyebrow">Research conversation</span>
+          <span className="eyebrow">研究对话</span>
           <h2 id="side-master-heading">Side Master</h2>
           <span className={`side-master-state ${chatState}`}>
             {chatState === "ready" && <ShieldCheck size={14} />}
             {chatState === "sending" && <RefreshCw className="spin" size={14} />}
             {(chatState === "uncertain" || chatState === "unavailable") && <AlertTriangle size={14} />}
-            {stateLabel(chatState)}
+            {chatStateLabel(chatState)}
           </span>
         </div>
 
@@ -174,11 +175,11 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
             {turns.length === 0 ? (
               <div className="conversation-empty">
                 <MessageSquareText size={18} />
-                <span>No conversation in this session</span>
+                <span>本次会话还没有消息</span>
               </div>
             ) : turns.map((turn) => (
               <div className={`conversation-turn ${turn.speaker}`} key={turn.id}>
-                <span>{turn.speaker === "operator" ? "Operator" : "Side Master"}</span>
+                <span>{turn.speaker === "operator" ? "操作员" : "Side Master"}</span>
                 <p>{turn.content}</p>
               </div>
             ))}
@@ -188,8 +189,8 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
             <div className="guidance-notice warning" role="status">
               <AlertTriangle size={16} />
               <div>
-                <strong>Provider outcome uncertain</strong>
-                <span>No guidance was created</span>
+                <strong>模型结果待核实</strong>
+                <span>没有创建研究指引</span>
               </div>
             </div>
           )}
@@ -197,12 +198,12 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
             <div className="guidance-notice error" role="alert">
               <AlertTriangle size={16} />
               <div>
-                <strong>Side Master unavailable</strong>
+                <strong>Side Master 暂不可用</strong>
                 <button
                   className="text-command"
                   onClick={() => void sendMessage(retry.content, retry.key, false)}
                 >
-                  <RefreshCw size={13} />Retry message
+                  <RefreshCw size={13} />重试消息
                 </button>
               </div>
             </div>
@@ -211,8 +212,8 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
             <div className="guidance-notice error" role="status">
               <AlertTriangle size={16} />
               <div>
-                <strong>Side Master unavailable</strong>
-                <span>Research conversation service is not configured</span>
+                <strong>Side Master 暂不可用</strong>
+                <span>请先启动研究服务</span>
               </div>
             </div>
           )}
@@ -222,11 +223,11 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
               <article className="proposal-item" key={item.proposal.proposal_id}>
                 <div className="proposal-heading">
                   <div>
-                    <span>Research direction proposal</span>
+                    <span>研究方向提案</span>
                     <strong>{item.proposal.interpretation}</strong>
                   </div>
                   <span className={`proposal-state ${item.proposal.state}`}>
-                    {item.proposal.state}
+                    {stateLabel(item.proposal.state)}
                   </span>
                 </div>
                 <p>{item.proposal.proposed_guidance}</p>
@@ -237,14 +238,14 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
                       disabled={item.pendingDecision !== null}
                       onClick={() => void decide(item, "reject")}
                     >
-                      <X size={15} />Reject proposal
+                      <X size={15} />拒绝提案
                     </button>
                     <button
                       className="button primary"
                       disabled={item.pendingDecision !== null}
                       onClick={() => void decide(item, "confirm")}
                     >
-                      <Check size={15} />Confirm proposal
+                      <Check size={15} />确认提案
                     </button>
                   </div>
                 )}
@@ -252,16 +253,16 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
                   <div className="proposal-outcome ok">
                     <Check size={15} />
                     <div>
-                      <strong>Confirmed for future research</strong>
-                      {item.guidance.active_campaign_immutable && <span>Active campaign unchanged</span>}
+                      <strong>已确认用于后续研究</strong>
+                      {item.guidance.active_campaign_immutable && <span>当前模拟盘保持不变</span>}
                     </div>
                   </div>
                 )}
                 {item.proposal.state === "rejected" && (
-                  <div className="proposal-outcome rejected"><X size={15} />Proposal rejected</div>
+                  <div className="proposal-outcome rejected"><X size={15} />提案已拒绝</div>
                 )}
                 {item.error && (
-                  <div className="proposal-outcome warning"><AlertTriangle size={15} />Decision unavailable</div>
+                  <div className="proposal-outcome warning"><AlertTriangle size={15} />决策暂未完成</div>
                 )}
               </article>
             ))}
@@ -274,7 +275,7 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
               submit();
             }}
           >
-            <label htmlFor="side-master-message">Research message</label>
+            <label htmlFor="side-master-message">研究消息</label>
             <textarea
               id="side-master-message"
               rows={3}
@@ -288,7 +289,7 @@ export function SideMasterPanel({ api, available, sessionId, missionId }: SideMa
               type="submit"
               disabled={!available || !content.trim() || chatState === "sending"}
             >
-              <Send size={15} />Send message
+              <Send size={15} />发送消息
             </button>
           </form>
         </div>

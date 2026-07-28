@@ -218,7 +218,7 @@ test("renders six Simplified Chinese work views without raw backend unavailable 
   for (const label of ["概览", "研究", "模型", "模拟盘", "证据", "设置"]) {
     expect(screen.getByRole("tab", { name: label })).toBeInTheDocument();
   }
-  expect(screen.getByText("Auto Trade 模拟盘控制台")).toBeInTheDocument();
+  expect(screen.getAllByText("Auto Trade 模拟盘控制台")).toHaveLength(2);
   expect(screen.getByText("仅限模拟交易")).toBeInTheDocument();
   expect(screen.getByText("尚未完成配置")).toBeInTheDocument();
   expect(document.body.textContent).not.toMatch(/unavailable|No active gateway runs|Risk blocking/i);

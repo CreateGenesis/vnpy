@@ -93,6 +93,54 @@ const readiness = {
   blockers: [],
 };
 
+const action = (action_id: string) => ({
+  contract_version: 2,
+  action_id,
+  target: action_id.split(".").slice(0, -1).join("."),
+  state: "enabled",
+  blockers: [],
+  remediation: [],
+  expected_revision: 7,
+});
+
+const system = {
+  contract_version: 2,
+  revision: 7,
+  configuration: { state: "active", active_version: 2, draft_revision: 1 },
+  services: [],
+  gateways: [
+    { gateway: "XTP", state: "connected", selected: true, error_code: null, updated_at_ms: 1_753_600_000_000 },
+    { gateway: "TORA", state: "connected", selected: true, error_code: null, updated_at_ms: 1_753_600_000_000 },
+  ],
+  actions: [
+    action("campaign.start"),
+    action("campaign.pause"),
+    action("campaign.emergency_stop"),
+  ],
+};
+
+const draft = {
+  revision: 1,
+  sections: {},
+  changed_sections: [],
+  test_receipts: {},
+  secret_status: {},
+};
+
+const research = { revision: 7, tasks: [] };
+
+const models = {
+  revision: 7,
+  current_candidate: {
+    state: "ready",
+    candidate_digest: digest("a"),
+    package_digest: digest("c"),
+    family: "lasso",
+    publication_revision: 2,
+  },
+  runs: [],
+};
+
 const envelope = (data: unknown, status: "ok" | "accepted" = "ok") => ({
   contract_version: 1,
   request_id: "b53bc59c-c626-4f16-8a3e-a3185c7dad24",
@@ -128,7 +176,15 @@ async function installDeterministicBackend(page: Page) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "POST") posts.push(path);
-    if (path === "/api/v1/projection") {
+    if (path === "/api/v1/system") {
+      await route.fulfill({ json: envelope(system) });
+    } else if (path === "/api/v1/config/draft") {
+      await route.fulfill({ json: envelope(draft) });
+    } else if (path === "/api/v1/research/tasks") {
+      await route.fulfill({ json: envelope(research) });
+    } else if (path === "/api/v1/models") {
+      await route.fulfill({ json: envelope(models) });
+    } else if (path === "/api/v1/projection") {
       await route.fulfill({ json: envelope(projection) });
     } else if (path === "/api/v1/readiness") {
       await route.fulfill({ json: envelope(readiness) });
@@ -153,28 +209,31 @@ test("desktop and mobile control, reconnect, chart, and screenshot acceptance", 
   const backend = await installDeterministicBackend(page);
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Current broker simulation" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "运行概览" })).toBeVisible();
   await page.locator('meta[name="auto-trade-csrf"]').evaluate((element) => {
     element.setAttribute("content", "acceptance-csrf-token-0123456789abcdef0123456789abcdef");
   });
-  await expect(page.getByText("Live connection")).toBeVisible();
+  await expect(page.getByText("实时连接")).toBeVisible();
 
-  const chart = page.getByLabel("Current and historical profit comparison").locator(".profit-chart");
+  await page.getByRole("tab", { name: "证据" }).click();
+  await expect(page.getByRole("heading", { name: "模拟盘证据" })).toBeVisible();
+  const chart = page.getByLabel("XTP 与 TORA 历史净收益比较").locator(".profit-chart");
   await expect(chart.locator("svg")).toBeVisible();
-  await expect(chart.locator(".recharts-rectangle")).toHaveCount(4);
+  await expect(chart.locator(".recharts-rectangle")).toHaveCount(2);
   const chartBox = await chart.boundingBox();
   expect(chartBox?.width ?? 0).toBeGreaterThan(100);
   expect(chartBox?.height ?? 0).toBeGreaterThan(100);
 
-  await page.getByRole("button", { name: "Pause campaign" }).click();
-  await expect(page.getByRole("dialog", { name: "Confirm pause campaign" })).toBeVisible();
-  await page.getByRole("button", { name: "Confirm pause" }).click();
-  await expect(page.getByRole("status", { name: "Immutable control receipt" })).toContainText("pause");
+  await page.getByRole("tab", { name: "模拟盘" }).click();
+  await page.getByRole("button", { name: "暂停模拟盘" }).click();
+  await expect(page.getByRole("dialog", { name: "确认暂停模拟盘" })).toBeVisible();
+  await page.getByRole("button", { name: "确认暂停" }).click();
+  await expect(page.getByRole("status")).toContainText("模拟盘已暂停");
 
-  await page.getByRole("button", { name: "Emergency stop" }).click();
-  await expect(page.getByRole("dialog", { name: "Confirm emergency stop" })).toBeVisible();
-  await page.getByRole("button", { name: "Confirm emergency stop" }).click();
-  await expect(page.getByRole("status", { name: "Immutable control receipt" })).toContainText("emergency stop");
+  await page.getByRole("button", { name: "紧急停止" }).click();
+  await expect(page.getByRole("dialog", { name: "确认紧急停止" })).toBeVisible();
+  await page.getByRole("button", { name: "确认紧急停止" }).click();
+  await expect(page.getByRole("status")).toContainText("紧急停止已执行");
   expect(backend.posts).toEqual([
     "/api/v1/campaigns/b53bc59c-c626-4f16-8a3e-a3185c7dad23/pause",
     "/api/v1/emergency-stop",
@@ -182,9 +241,9 @@ test("desktop and mobile control, reconnect, chart, and screenshot acceptance", 
 
   const socketCount = backend.sockets.length;
   backend.sockets.at(-1)?.close();
-  await expect(page.getByText(/Reconnecting.*attempt 1/)).toBeVisible();
+  await expect(page.getByText("正在重连，第 1 次")).toBeVisible();
   await expect.poll(() => backend.sockets.length).toBeGreaterThan(socketCount);
-  await expect(page.getByText("Live connection")).toBeVisible();
+  await expect(page.getByText("实时连接")).toBeVisible();
 
   const noHorizontalOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth <= window.innerWidth,
