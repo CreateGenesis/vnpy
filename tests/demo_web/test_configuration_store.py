@@ -106,3 +106,30 @@ def test_activation_is_atomic_and_failed_health_restores_previous_version(
     assert failed["state"] == "activation_failed"
     assert failed["restored_version"] == active_one["version"]
     assert store.read_active()["version"] == active_one["version"]
+
+
+def test_active_secret_snapshot_is_immutable_while_next_draft_is_edited(
+    tmp_path: Path,
+) -> None:
+    now = [30_000]
+    store = build_store(tmp_path, now, [False])
+    first = store.update_draft(
+        expected_revision=0,
+        sections={"xtp": {"account": "simulation"}},
+        secret_updates={"xtp.password": "active-password"},
+    )
+    store.record_section_test("xtp", expected_revision=first["revision"], passed=True)
+    store.activate(expected_revision=first["revision"], health_check=lambda _: True)
+
+    store.update_draft(
+        expected_revision=first["revision"],
+        sections={},
+        secret_updates={"xtp.password": "untested-next-password"},
+    )
+
+    assert store.read_section_secrets("xtp") == {
+        "password": "untested-next-password"
+    }
+    assert store.read_active_section_secrets("xtp") == {
+        "password": "active-password"
+    }

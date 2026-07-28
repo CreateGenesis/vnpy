@@ -98,6 +98,7 @@ class BrokerSimulationModelLoop:
         lifecycle_revision: int,
         symbols: tuple[str, ...],
         now_ns: Callable[[], int] = time_ns,
+        session_open: Callable[[Any], bool] | None = None,
         poll_interval_seconds: float = 0.001,
     ) -> None:
         if gateway not in {"XTP", "TORA"}:
@@ -127,6 +128,7 @@ class BrokerSimulationModelLoop:
         self._lifecycle_revision = lifecycle_revision
         self._symbols = frozenset(symbols)
         self._now_ns = now_ns
+        self._session_open = session_open or _session_open
         self._poll_interval_seconds = poll_interval_seconds
         self._stop = ThreadEvent()
         self._thread: Thread | None = None
@@ -405,7 +407,7 @@ class BrokerSimulationModelLoop:
             "created_at_ns": now_ns,
             "expires_at_ns": expires_at_ns,
             "market_time_ns": market_time_ns,
-            "session_open": _session_open(getattr(tick, "datetime", None)),
+            "session_open": self._session_open(getattr(tick, "datetime", None)),
             "suspended_symbols": [],
             "lower_limit_micros": {symbol: _price_micros(getattr(tick, "limit_down", 0))},
             "upper_limit_micros": {symbol: _price_micros(getattr(tick, "limit_up", 0))},

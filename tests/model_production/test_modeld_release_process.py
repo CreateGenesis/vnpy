@@ -339,6 +339,7 @@ def test_release_modeld_round_trip_keeps_broker_authority_in_vnpy(tmp_path: Path
         text=True,
     )
     loop: BrokerSimulationModelLoop | None = None
+    market_time = datetime.now()
     try:
         health_line = process.stdout.readline() if process.stdout is not None else ""
         assert health_line, process.stderr.read() if process.stderr is not None else ""
@@ -425,6 +426,7 @@ def test_release_modeld_round_trip_keeps_broker_authority_in_vnpy(tmp_path: Path
             lifecycle_revision=8,
             symbols=("600000.SH",),
             now_ns=time_ns,
+            session_open=lambda _timestamp: True,
         )
         loop.start()
         events.handlers[EVENT_TICK](
@@ -434,7 +436,7 @@ def test_release_modeld_round_trip_keeps_broker_authority_in_vnpy(tmp_path: Path
                     gateway_name="XTP",
                     symbol="600000",
                     exchange=Exchange.SSE,
-                    datetime=datetime(2026, 7, 28, 10, 0),
+                    datetime=market_time,
                     last_price=10,
                     bid_price_1=9.99,
                     ask_price_1=10.01,

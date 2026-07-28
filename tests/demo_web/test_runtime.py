@@ -34,11 +34,9 @@ def test_runtime_starts_blocked_without_candidate_or_local_services(tmp_path: Pa
 
     assert readiness["ready"] is False
     assert readiness["state"] == "blocked"
-    assert {item["code"] for item in readiness["blockers"]} >= {
+    assert {item["code"] for item in readiness["blockers"]} == {
         "CANDIDATE_NOT_READY",
-        "RUN_XTP_UNAVAILABLE",
-        "RUN_TORA_UNAVAILABLE",
-        "SIDE_MASTER_UNAVAILABLE",
+        "GATEWAY_NOT_SELECTED",
     }
     assert projection["candidate"]["readiness"] == "unavailable"
     assert projection["current"]["campaign_state"] == "unavailable"
@@ -126,8 +124,11 @@ def test_runtime_rejects_malformed_candidate_and_non_loopback_descriptors(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="DEMO_ENDPOINT_LOOPBACK_REQUIRED"):
-        build_demo_runtime(tmp_path, host="127.0.0.1", port=8765)
+    runtime = build_demo_runtime(tmp_path, host="127.0.0.1", port=8765)
+    gateways = {
+        item["gateway"]: item for item in runtime.operations.system()["gateways"]
+    }
+    assert gateways["XTP"]["state"] == "unavailable"
 
 
 def test_length_prefixed_transport_authenticates_and_round_trips_strict_json() -> None:

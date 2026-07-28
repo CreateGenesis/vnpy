@@ -579,8 +579,6 @@ class RunIpcServer:
                     response = self._serve_connection(connection)
                     encoded = _json_bytes(response)
                     connection.sendall(struct.pack(">I", len(encoded)) + encoded)
-                    if self._host.shutdown_requested:
-                        return
         finally:
             self._listener.close()
             self._host.close()

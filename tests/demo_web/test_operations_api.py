@@ -64,6 +64,14 @@ class Operations:
         self.calls.append(("service", (service, action, command)))
         return {"revision": command["expected_revision"] + 1, "service": service, "state": "ready"}
 
+    def control_gateway(self, gateway: str, action: str, command: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(("gateway", (gateway, action, command)))
+        return {
+            "revision": command["expected_revision"] + 1,
+            "gateway": gateway,
+            "state": "connected",
+        }
+
 
 def client(operations: Operations) -> TestClient:
     config = DemoWebConfig("127.0.0.1", 8765, ORIGIN, SESSION, CSRF)
@@ -118,6 +126,47 @@ def test_section_activation_and_fixed_service_routes_require_write_guards() -> N
         json={"expected_revision": 3, "idempotency_key": "service-start-0002"},
         headers=headers(),
     ).status_code == 422
+
+
+def test_gateway_routes_are_explicit_and_selection_is_not_implicit() -> None:
+    operations = Operations()
+    api = client(operations)
+
+    started = api.post(
+        "/api/v1/gateways/XTP/start",
+        json={"expected_revision": 0, "idempotency_key": "gateway-start-xtp-0001"},
+        headers=headers(),
+    )
+    missing_selection = api.post(
+        "/api/v1/gateways/XTP/select",
+        json={"expected_revision": 1, "idempotency_key": "gateway-select-xtp-001"},
+        headers=headers(),
+    )
+    selected = api.post(
+        "/api/v1/gateways/XTP/select",
+        json={
+            "expected_revision": 1,
+            "idempotency_key": "gateway-select-xtp-002",
+            "selected": True,
+        },
+        headers=headers(),
+    )
+
+    assert started.status_code == 202
+    assert missing_selection.status_code == 422
+    assert selected.status_code == 202
+    assert operations.calls[-1] == (
+        "gateway",
+        (
+            "XTP",
+            "select",
+            {
+                "expected_revision": 1,
+                "idempotency_key": "gateway-select-xtp-002",
+                "selected": True,
+            },
+        ),
+    )
     assert api.post(
         "/api/v1/services/research/run-command",
         json={"expected_revision": 3, "idempotency_key": "service-start-0003"},

@@ -150,6 +150,25 @@ class ConfigurationStore:
                 if key.startswith(prefix)
             }
 
+    def read_active_section_secrets(self, section: str) -> dict[str, str]:
+        with self._lock:
+            active = self.read_active()
+            version = active.get("version")
+            if (
+                active.get("state") != "active"
+                or not isinstance(version, int)
+                or isinstance(version, bool)
+                or version < 1
+            ):
+                raise ConfigurationSecurityError("CONFIGURATION_ACTIVE_SECRET_UNAVAILABLE")
+            secrets = self._load_version_secrets(version)
+            prefix = section + "."
+            return {
+                key[len(prefix) :]: value
+                for key, value in secrets.items()
+                if key.startswith(prefix)
+            }
+
     def update_draft(
         self,
         *,
@@ -261,6 +280,7 @@ class ConfigurationStore:
                 "operator_identity_digest": "sha256:" + sha256(self._operator_identity.encode()).hexdigest(),
             }
             _atomic_json(self._versions / f"{version}.json", candidate)
+            self._write_version_secrets(version, secrets)
             if not health_check(dict(candidate)):
                 return {
                     "state": "activation_failed",
@@ -312,6 +332,32 @@ class ConfigurationStore:
         finally:
             del plaintext
         _atomic_bytes(self._secret_path, encrypted)
+
+    def _write_version_secrets(self, version: int, secrets: dict[str, str]) -> None:
+        plaintext = json.dumps(secrets, sort_keys=True, separators=(",", ":")).encode()
+        context = self._context + b":version:" + str(version).encode("ascii")
+        try:
+            encrypted = self._protector.protect(plaintext, context=context)
+        finally:
+            del plaintext
+        _atomic_bytes(self._versions / f"{version}.bin", encrypted)
+
+    def _load_version_secrets(self, version: int) -> dict[str, str]:
+        path = self._versions / f"{version}.bin"
+        if not path.is_file():
+            raise ConfigurationSecurityError("CONFIGURATION_ACTIVE_SECRET_UNAVAILABLE")
+        context = self._context + b":version:" + str(version).encode("ascii")
+        plaintext = self._protector.unprotect(path.read_bytes(), context=context)
+        try:
+            value = json.loads(plaintext)
+        finally:
+            del plaintext
+        if not isinstance(value, dict) or not all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value.items()
+        ):
+            raise ConfigurationSecurityError("CONFIGURATION_SECRET_PAYLOAD_INVALID")
+        return value
 
     def _section_digest(self, draft: dict[str, Any], secrets: dict[str, str], section: str) -> str:
         return _digest_json(

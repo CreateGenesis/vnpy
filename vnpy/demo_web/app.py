@@ -159,18 +159,24 @@ class DemoOperationsBackend(Protocol):
         self, service: str, action: str, command: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def control_gateway(
+        self, gateway: str, action: str, command: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
 
 class CampaignStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     candidate_digest: str = Field(pattern=_DIGEST_PATTERN)
-    gateways: list[Literal["XTP", "TORA"]] = Field(min_length=1, max_length=2)
+    gateways: list[Literal["XTP", "TORA"]] | None = Field(
+        default=None, min_length=1, max_length=2
+    )
     idempotency_key: str = Field(min_length=16, max_length=128)
 
     @field_validator("gateways")
     @classmethod
-    def require_unique_gateways(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
+    def require_unique_gateways(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and len(set(value)) != len(value):
             raise ValueError("duplicate gateway")
         return value
 
@@ -226,6 +232,10 @@ class RevisionedOperationRequest(BaseModel):
 
     expected_revision: int = Field(ge=0)
     idempotency_key: str = Field(min_length=16, max_length=128)
+
+
+class GatewayOperationRequest(RevisionedOperationRequest):
+    selected: bool | None = None
 
 
 class _ResponseRedactionError(RuntimeError):
@@ -401,6 +411,26 @@ def create_demo_app(
                     action,
                     command.model_dump(mode="json"),
                 ),
+                accepted=True,
+            )
+
+        @app.post(
+            "/api/v1/gateways/{gateway}/{action}",
+            dependencies=write_dependencies,
+            status_code=202,
+        )
+        def control_gateway(
+            gateway: Literal["XTP", "TORA"],
+            action: Literal["start", "stop", "reconnect", "select"],
+            command: GatewayOperationRequest,
+        ) -> JSONResponse:
+            payload = command.model_dump(mode="json", exclude_none=True)
+            if action == "select" and "selected" not in payload:
+                return _error_response(422, "GATEWAY_SELECTION_REQUIRED")
+            if action != "select" and "selected" in payload:
+                return _error_response(422, "GATEWAY_SELECTION_NOT_ALLOWED")
+            return _invoke(
+                lambda: operations.control_gateway(gateway, action, payload),
                 accepted=True,
             )
 

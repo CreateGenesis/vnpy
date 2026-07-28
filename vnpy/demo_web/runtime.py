@@ -16,12 +16,13 @@ from secrets import token_urlsafe
 import subprocess
 from threading import RLock
 from time import time_ns
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .app import DemoWebConfig
 from .configuration import ConfigurationStore
 from .configuration_tests import ConfigurationSectionTester
+from .gateway_control import GatewayControlService
 from .guidance import GuidanceClientBinding, SideMasterGuidanceClient
 from .projection import (
     CandidateProjectionInput,
@@ -31,7 +32,7 @@ from .projection import (
     LatencyProjectionInput,
     PositionProjectionInput,
 )
-from .run_clients import BrokerSimulationRunClient, RunClientBinding
+from .run_clients import BrokerSimulationRunClient
 from .operations import OperationsService
 from .security import BootstrapSessionManager
 from .supervisor import (
@@ -73,6 +74,12 @@ class DemoRuntime:
     bootstrap_fragment_token: str
 
 
+class GatewayProvider(Protocol):
+    def clients(self) -> dict[str, BrokerSimulationRunClient]: ...
+
+    def selected_gateways(self) -> set[str]: ...
+
+
 class ConcreteDemoBackend:
     """Read authoritative local projections and expose bounded controls."""
 
@@ -80,12 +87,12 @@ class ConcreteDemoBackend:
         self,
         project_root: Path,
         candidate: DemoCandidate | None,
-        clients: dict[str, BrokerSimulationRunClient],
+        clients: dict[str, BrokerSimulationRunClient] | GatewayProvider,
         guidance_available: bool,
     ) -> None:
         self._project_root = project_root
         self._candidate = candidate
-        self._clients = dict(clients)
+        self._gateway_provider = clients
         self._guidance_available = guidance_available
         self._projection_store = DemoProjectionStore(
             project_root / ".demo-state" / "projection.json"
@@ -96,12 +103,18 @@ class ConcreteDemoBackend:
 
     def readiness(self) -> dict[str, Any]:
         blockers: list[dict[str, str]] = []
+        clients = self._current_clients()
+        selected = self._selected_gateways()
         if self._candidate is None or not self._candidate.ready:
             blockers.append(
                 {"code": "CANDIDATE_NOT_READY", "detail": "Exact candidate is unavailable."}
             )
-        for gateway in _GATEWAYS:
-            if gateway not in self._clients:
+        if not selected:
+            blockers.append(
+                {"code": "GATEWAY_NOT_SELECTED", "detail": "No simulation gateway is selected."}
+            )
+        for gateway in sorted(selected):
+            if gateway not in clients:
                 blockers.append(
                     {
                         "code": f"RUN_{gateway}_UNAVAILABLE",
@@ -110,7 +123,7 @@ class ConcreteDemoBackend:
                 )
                 continue
             try:
-                status = self._clients[gateway].read_status()
+                status = clients[gateway].read_status()
             except Exception:
                 blockers.append(
                     {
@@ -126,13 +139,6 @@ class ConcreteDemoBackend:
                             "detail": f"{gateway} isolated run service is not ready.",
                         }
                     )
-        if not self._guidance_available:
-            blockers.append(
-                {
-                    "code": "SIDE_MASTER_UNAVAILABLE",
-                    "detail": "Research conversation service is unavailable.",
-                }
-            )
         return {
             "state": "ready" if not blockers else "blocked",
             "ready": not blockers,
@@ -144,7 +150,7 @@ class ConcreteDemoBackend:
             "components": [
                 {
                     "name": f"run-{gateway.lower()}",
-                    "state": "configured" if gateway in self._clients else "unavailable",
+                    "state": "configured" if gateway in clients else "unavailable",
                 }
                 for gateway in _GATEWAYS
             ]
@@ -159,6 +165,8 @@ class ConcreteDemoBackend:
 
     def projection(self) -> dict[str, Any]:
         state = self._state_store.read()
+        clients = self._current_clients()
+        selected = self._selected_gateways()
         candidate = self._candidate
         current = state["current"]
         gateways: tuple[GatewayProjectionInput, ...] = ()
@@ -177,7 +185,8 @@ class ConcreteDemoBackend:
         elif (
             candidate is not None
             and candidate.ready
-            and all(gateway in self._clients for gateway in _GATEWAYS)
+            and selected
+            and all(gateway in clients for gateway in selected)
         ):
             actions.insert(0, "start")
         projection = self._projection_store.publish(
@@ -224,11 +233,20 @@ class ConcreteDemoBackend:
             raise RuntimeError("CANDIDATE_NOT_READY")
         if command.get("candidate_digest") != candidate.candidate_digest:
             raise RuntimeError("CANDIDATE_IDENTITY_MISMATCH")
-        gateways = command.get("gateways")
-        if not isinstance(gateways, list) or any(
-            gateway not in self._clients for gateway in gateways
+        clients = self._current_clients()
+        selected = self._selected_gateways()
+        requested = command.get("gateways")
+        if requested is not None and (
+            not isinstance(requested, list) or set(requested) != selected
         ):
+            raise RuntimeError("SELECTED_GATEWAY_SET_MISMATCH")
+        gateways = sorted(selected)
+        if not gateways:
+            raise RuntimeError("GATEWAY_NOT_SELECTED")
+        if any(gateway not in clients for gateway in gateways):
             raise RuntimeError("RUN_SERVICE_UNAVAILABLE")
+        if any(not self._gateway_ready(clients[gateway]) for gateway in gateways):
+            raise RuntimeError("SELECTED_GATEWAY_NOT_READY")
         idempotency_key = command.get("idempotency_key")
         if not isinstance(idempotency_key, str):
             raise RuntimeError("IDEMPOTENCY_KEY_REQUIRED")
@@ -251,7 +269,7 @@ class ConcreteDemoBackend:
         receipts: list[dict[str, Any]] = []
         try:
             for gateway in gateways:
-                receipt = self._clients[gateway].prepare_campaign(
+                receipt = clients[gateway].prepare_campaign(
                     campaign_id,
                     campaign_digest,
                     candidate.candidate_digest,
@@ -260,7 +278,7 @@ class ConcreteDemoBackend:
                 _require_run_state(receipt, {"prepared"})
                 receipts.append(receipt)
             for gateway in gateways:
-                receipt = self._clients[gateway].start_campaign(
+                receipt = clients[gateway].start_campaign(
                     campaign_id,
                     campaign_digest,
                     _child_idempotency("start", idempotency_key, gateway),
@@ -272,7 +290,7 @@ class ConcreteDemoBackend:
             containment = []
             for gateway in gateways:
                 try:
-                    receipt = self._clients[gateway].emergency_stop(
+                    receipt = clients[gateway].emergency_stop(
                         _child_idempotency("start-failure-stop", idempotency_key, gateway)
                     )
                     _require_run_state(receipt, {"contained", "stopped"})
@@ -318,9 +336,13 @@ class ConcreteDemoBackend:
         if not isinstance(current, dict) or current["campaign_id"] != campaign_id:
             raise RuntimeError("CAMPAIGN_NOT_ACTIVE")
         receipts = []
+        clients = self._current_clients()
         for gateway in current["gateways"]:
+            if gateway not in clients:
+                receipts.append({"gateway": gateway, "state": "unavailable"})
+                continue
             receipts.append(
-                self._clients[gateway].pause_campaign(
+                clients[gateway].pause_campaign(
                     current["campaign_digest"],
                     f"pause-campaign-{campaign_id}-{gateway.lower()}",
                 )
@@ -342,7 +364,7 @@ class ConcreteDemoBackend:
 
     def emergency_stop(self) -> dict[str, Any]:
         receipts: list[dict[str, Any]] = []
-        for gateway, client in sorted(self._clients.items()):
+        for gateway, client in sorted(self._current_clients().items()):
             try:
                 receipt = client.emergency_stop(f"web-emergency-{token_urlsafe(24)}")
             except Exception:
@@ -382,7 +404,33 @@ class ConcreteDemoBackend:
         return revision + 1 if isinstance(revision, int) and revision >= 0 else 1
 
     def _gateway_projection(self, gateway: str) -> GatewayProjectionInput:
-        client = self._clients[gateway]
+        clients = self._current_clients()
+        client = clients.get(gateway)
+        if client is None:
+            return GatewayProjectionInput(
+                gateway=gateway,
+                run_digest=_UNAVAILABLE_DIGEST,
+                state="unavailable",
+                connection_state="disconnected",
+                reconciliation_state="blocked",
+                net_profit_minor=0,
+                realized_profit_minor=0,
+                unrealized_profit_minor=0,
+                fees_minor=0,
+                return_bps=0,
+                max_drawdown_bps=0,
+                fill_count=0,
+                positions=(),
+                gross_exposure_minor=0,
+                risk_headroom_minor=0,
+                local_latency_us=LatencyProjectionInput(0, 0, 0, 0, 0),
+                broker_latency_us=LatencyProjectionInput(0, 0, 0, 0, 0),
+                incidents=("RUN_SERVICE_UNAVAILABLE",),
+                residual_exposure_minor=0,
+                working_order_count=0,
+                unresolved_outcomes=0,
+                permitted_next_action="none",
+            )
         try:
             status = client.read_status()
             data = status.get("data") if isinstance(status.get("data"), dict) else {}
@@ -431,6 +479,36 @@ class ConcreteDemoBackend:
             permitted_next_action=str(data.get("permitted_next_action", "none")),
         )
 
+    def current_campaign(self) -> dict[str, Any] | None:
+        current = self._state_store.read()["current"]
+        return dict(current) if isinstance(current, dict) else None
+
+    def _current_clients(self) -> dict[str, BrokerSimulationRunClient]:
+        provider = self._gateway_provider
+        if isinstance(provider, dict):
+            return dict(provider)
+        return dict(provider.clients())
+
+    def _selected_gateways(self) -> set[str]:
+        provider = self._gateway_provider
+        if isinstance(provider, dict):
+            return set(provider)
+        return set(provider.selected_gateways())
+
+    @staticmethod
+    def _gateway_ready(client: BrokerSimulationRunClient) -> bool:
+        try:
+            health = client.gateway_health()
+        except Exception:
+            try:
+                health = client.read_status()
+            except Exception:
+                return False
+        if health.get("state") in {"connected", "ready", "prepared", "paused"}:
+            return True
+        data = health.get("data")
+        return isinstance(data, dict) and data.get("connection_state") == "connected"
+
 
 def build_demo_runtime(
     project_root: str | Path,
@@ -445,23 +523,6 @@ def build_demo_runtime(
         raise ValueError("DEMO_LOOPBACK_BIND_REQUIRED")
     state_root = root / ".demo-state"
     candidate = _load_candidate(state_root / "ready-candidate.json")
-    clients: dict[str, BrokerSimulationRunClient] = {}
-    for gateway in _GATEWAYS:
-        descriptor_path = state_root / "runs" / gateway / "endpoint.json"
-        token_path = root / ".demo-secrets" / f"run-{gateway.lower()}-ipc-token"
-        if not descriptor_path.exists() and not token_path.exists():
-            continue
-        descriptor = _load_endpoint(descriptor_path, gateway=gateway)
-        token = _load_token(token_path)
-        clients[gateway] = BrokerSimulationRunClient(
-            RunClientBinding(
-                gateway=gateway,
-                run_digest=descriptor["run_digest"],
-                endpoint=f"tcp://{descriptor['address']}",
-            ),
-            LengthPrefixedJsonTransport(token),
-        )
-
     guidance_endpoint = root / ".agent-state" / "guidance-endpoint.json"
     guidance_token_path = root / ".agent-state" / "demo-guidance-ipc-token"
     guidance_descriptor: dict[str, Any] | None = None
@@ -472,26 +533,6 @@ def build_demo_runtime(
             _load_token(guidance_token_path), timeout_seconds=120
         )
 
-    backend = ConcreteDemoBackend(
-        root,
-        candidate,
-        clients,
-        guidance_available=guidance_descriptor is not None,
-    )
-    guidance = None
-    if guidance_descriptor is not None and guidance_transport is not None:
-        guidance = SideMasterGuidanceClient(
-            GuidanceClientBinding(
-                endpoint=f"tcp://{guidance_descriptor['address']}",
-                operator_identity_digest=_load_operator_digest(
-                    root / ".demo-secrets" / "operator.json"
-                ),
-            ),
-            guidance_transport,
-            active_campaign=backend.active_campaign,
-            next_safe_boundary_revision=backend.next_safe_boundary_revision,
-        )
-
     config = DemoWebConfig(
         bind_host=host,
         port=port,
@@ -500,10 +541,15 @@ def build_demo_runtime(
         csrf_token=token_urlsafe(48),
     )
     operator_sid = _current_operator_sid()
+    backend_holder: dict[str, ConcreteDemoBackend] = {}
     configuration = ConfigurationStore(
         root / ".operations-state" / "configuration",
         operator_identity=operator_sid,
-        campaign_active=backend.active_campaign,
+        campaign_active=lambda: (
+            backend_holder["backend"].active_campaign()
+            if "backend" in backend_holder
+            else False
+        ),
     )
     tester = ConfigurationSectionTester(current_operator_sid=lambda: _current_operator_sid())
     active_version = max(1, int(configuration.read_active().get("version", 0)))
@@ -521,11 +567,48 @@ def build_demo_runtime(
             runtime=LocalProcessRuntime(),
         )
     )
+    gateway_control = GatewayControlService(
+        root,
+        configuration,
+        supervisor,
+        active_campaign=lambda: (
+            backend_holder["backend"].current_campaign()
+            if "backend" in backend_holder
+            else None
+        ),
+        pause_campaign=lambda campaign_id: backend_holder["backend"].pause_campaign(
+            campaign_id
+        ),
+    )
+    backend = ConcreteDemoBackend(
+        root,
+        candidate,
+        gateway_control,
+        guidance_available=guidance_descriptor is not None,
+    )
+    backend_holder["backend"] = backend
+    guidance = None
+    if guidance_descriptor is not None and guidance_transport is not None:
+        guidance = SideMasterGuidanceClient(
+            GuidanceClientBinding(
+                endpoint=f"tcp://{guidance_descriptor['address']}",
+                operator_identity_digest=_load_operator_digest(
+                    root / ".demo-secrets" / "operator.json"
+                ),
+            ),
+            guidance_transport,
+            active_campaign=backend.active_campaign,
+            next_safe_boundary_revision=backend.next_safe_boundary_revision,
+        )
     operations = OperationsService(
         configuration,
         tester,
         supervisor,
         candidate_ready=lambda: candidate is not None and candidate.ready,
+        gateway_control=gateway_control,
+        campaign_state=lambda: (
+            backend.current_campaign() or {"state": "stopped"}
+        )["state"],
     )
     security = BootstrapSessionManager(
         allowed_origin=config.allowed_origin,
