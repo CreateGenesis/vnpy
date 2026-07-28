@@ -178,6 +178,39 @@ def test_responses_fail_closed_on_secret_bearing_backend_data() -> None:
     assert "credential_ref" not in response.text
 
 
+def test_safe_configuration_status_fields_are_not_rejected_as_secrets() -> None:
+    backend = FakeBackend()
+    backend.readiness = lambda: {
+        "state": "ready",
+        "credential_configured": True,
+        "account_fingerprint": digest("account"),
+        "token_status": "configured",
+    }
+    client, _ = authenticated_client(backend)
+
+    response = client.get("/api/v1/readiness")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["credential_configured"] is True
+
+
+def test_public_errors_are_stable_chinese_envelopes_without_backend_text() -> None:
+    backend = FakeBackend()
+
+    def explode() -> dict[str, Any]:
+        raise RuntimeError("raw provider error containing secret-token")
+
+    backend.readiness = explode
+    client, _ = authenticated_client(backend)
+    response = client.get("/api/v1/readiness")
+
+    assert response.status_code == 500
+    assert response.json()["errors"] == [
+        {"code": "BACKEND_OPERATION_FAILED", "message": "请求未能完成。"}
+    ]
+    assert "raw provider" not in response.text
+
+
 def test_websocket_requires_session_and_same_origin() -> None:
     app = create_demo_app(config(), FakeBackend())
     unauthenticated = TestClient(app)

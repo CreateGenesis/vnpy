@@ -22,9 +22,11 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 _SESSION_COOKIE = "auto_trade_host_session"
@@ -46,14 +48,11 @@ _CONTENT_SECURITY_POLICY = "; ".join(
 )
 _FORBIDDEN_PUBLIC_KEYS = frozenset(
     {
-        "account",
-        "account_id",
-        "account_fingerprint",
-        "cancel",
         "cancel_order",
         "cancel_request",
         "credential",
         "credential_ref",
+        "credential_value",
         "main_engine",
         "order",
         "order_request",
@@ -61,12 +60,18 @@ _FORBIDDEN_PUBLIC_KEYS = frozenset(
         "private_key",
         "rpc",
         "rpc_endpoint",
+        "secret",
+        "secret_value",
         "send_order",
-        "server_fingerprint",
         "state_store_path",
         "token",
+        "api_key",
+        "access_token",
+        "refresh_token",
     }
 )
+_SAFE_SECRET_STATUS_SUFFIXES = ("_configured", "_fingerprint", "_status")
+_SECRET_MATERIAL_SUFFIXES = ("_api_key", "_credential", "_password", "_secret", "_token")
 
 
 @dataclass(frozen=True)
@@ -193,6 +198,18 @@ def create_demo_app(
         redoc_url=None,
         openapi_url=None,
     )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def public_http_error(_request: Request, error: StarletteHTTPException) -> JSONResponse:
+        detail = error.detail
+        code = detail if isinstance(detail, str) and detail.isupper() else "HTTP_REQUEST_FAILED"
+        return _error_response(error.status_code, code)
+
+    @app.exception_handler(RequestValidationError)
+    async def public_validation_error(
+        _request: Request, _error: RequestValidationError
+    ) -> JSONResponse:
+        return _error_response(422, "REQUEST_VALIDATION_FAILED")
 
     def require_session(
         request: Request,
@@ -362,7 +379,7 @@ def _error_response(status_code: int, code: str) -> JSONResponse:
             "status": "error",
             "revision": 0,
             "data": {},
-            "errors": [{"code": code, "message": "Request could not be completed."}],
+            "errors": [{"code": code, "message": "请求未能完成。"}],
         },
     )
 
@@ -376,7 +393,7 @@ def _assert_public_response(value: Any) -> None:
 def _walk_public_value(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            if not isinstance(key, str) or key.lower() in _FORBIDDEN_PUBLIC_KEYS:
+            if not isinstance(key, str) or _is_forbidden_public_key(key):
                 raise _ResponseRedactionError
             _walk_public_value(item)
     elif isinstance(value, list | tuple):
@@ -388,3 +405,12 @@ def _walk_public_value(value: Any) -> None:
 
 def _is_nonnegative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_forbidden_public_key(key: str) -> bool:
+    normalized = key.casefold()
+    if normalized in _FORBIDDEN_PUBLIC_KEYS:
+        return True
+    if normalized.endswith(_SAFE_SECRET_STATUS_SUFFIXES):
+        return False
+    return normalized.endswith(_SECRET_MATERIAL_SUFFIXES)
