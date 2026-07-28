@@ -115,6 +115,14 @@ class LocalProcessRuntime:
 
     def terminate(self, pid: int) -> None:
         child = self._children.pop(pid, None)
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
         if child is not None:
             child.terminate()
             try:
@@ -123,15 +131,7 @@ class LocalProcessRuntime:
                 child.kill()
                 child.wait(timeout=5)
             return
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill.exe", "/PID", str(pid), "/T"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            os.kill(pid, 15)
+        os.kill(pid, 15)
 
     def healthy(self, spec: ServiceSpec, identity: ProcessIdentity, endpoint: str) -> bool:
         deadline = monotonic() + spec.health_timeout_seconds

@@ -8,6 +8,7 @@ import pytest
 from vnpy.demo_web.contracts import ServiceName
 from vnpy.demo_web.supervisor import (
     FixedServiceSupervisor,
+    LocalProcessRuntime,
     ProcessIdentity,
     ServiceSpec,
     SupervisorError,
@@ -126,3 +127,26 @@ def test_restart_recovery_and_web_port_handoff_start_replacement_first(
     assert handoff["next_url"] == "http://127.0.0.1:8877"
     assert handoff["pid"] != started["pid"]
     assert runtime.events[-2:] == [("spawn", handoff["pid"]), ("terminate", started["pid"])]
+
+
+def test_windows_local_runtime_terminates_the_verified_process_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    class Child:
+        def poll(self) -> None:
+            return None
+
+    def run(command: list[str], **_kwargs: object) -> None:
+        commands.append(command)
+
+    runtime = LocalProcessRuntime()
+    runtime._children[4321] = Child()  # type: ignore[assignment]
+    monkeypatch.setattr("vnpy.demo_web.supervisor.os.name", "nt")
+    monkeypatch.setattr("vnpy.demo_web.supervisor.subprocess.run", run)
+
+    runtime.terminate(4321)
+
+    assert commands == [["taskkill.exe", "/PID", "4321", "/T", "/F"]]
+    assert 4321 not in runtime._children
