@@ -129,6 +129,8 @@ class DemoWebBackend(Protocol):
 
     def evidence(self, campaign_id: str) -> dict[str, Any]: ...
 
+    def models(self) -> dict[str, Any]: ...
+
 
 class DemoGuidanceBackend(Protocol):
     """Research-only Side Master boundary; never a main-Master or trading bridge."""
@@ -520,6 +522,16 @@ def create_demo_app(
     @app.get("/api/v1/evidence/{campaign_id}", dependencies=read_dependencies)
     def get_evidence(campaign_id: UUID) -> JSONResponse:
         return _invoke(lambda: backend.evidence(str(campaign_id)), accepted=False)
+
+    @app.get("/api/v1/models", dependencies=read_dependencies)
+    def get_models() -> JSONResponse:
+        projection = getattr(backend, "models", None)
+        if not callable(projection):
+            return _invoke(
+                lambda: {"revision": 0, "current_candidate": None, "runs": []},
+                accepted=False,
+            )
+        return _invoke(projection, accepted=False)
 
     @app.get("/api/v1/research/tasks", dependencies=read_dependencies)
     def list_research_tasks() -> JSONResponse:

@@ -396,6 +396,81 @@ class ConcreteDemoBackend:
             raise ValueError("DEMO_EVIDENCE_INVALID")
         return value
 
+    def models(self) -> dict[str, Any]:
+        """Project allowlisted candidate and model-run fields from durable local state."""
+
+        state_root = self._project_root / ".demo-state"
+        publication_path = state_root / "ready-candidate-v2.json"
+        current_candidate: dict[str, Any] | None = None
+        revision = 0
+        if publication_path.is_file():
+            publication = _load_unique_json(publication_path)
+            if not isinstance(publication, dict):
+                raise ValueError("DEMO_CANDIDATE_PROJECTION_INVALID")
+            required = {
+                "state",
+                "candidate_digest",
+                "package_digest",
+                "revision",
+            }
+            if (
+                not required.issubset(publication)
+                or publication["state"]
+                not in {"ready", "expired", "invalidated", "rollback"}
+                or not all(
+                    isinstance(publication[key], str)
+                    and _DIGEST.fullmatch(publication[key]) is not None
+                    for key in ("candidate_digest", "package_digest")
+                )
+                or not isinstance(publication["revision"], int)
+                or isinstance(publication["revision"], bool)
+                or publication["revision"] < 1
+            ):
+                raise ValueError("DEMO_CANDIDATE_PROJECTION_INVALID")
+            revision = publication["revision"]
+            current_candidate = {
+                "state": publication["state"],
+                "candidate_digest": publication["candidate_digest"],
+                "package_digest": publication["package_digest"],
+                "family": _candidate_family(
+                    state_root,
+                    publication["candidate_digest"],
+                ),
+                "publication_revision": revision,
+            }
+        elif self._candidate is not None:
+            revision = self._candidate.lifecycle_revision
+            current_candidate = {
+                "state": "ready" if self._candidate.ready else "invalidated",
+                "candidate_digest": self._candidate.candidate_digest,
+                "package_digest": self._candidate.package_digest,
+                "family": _candidate_family(
+                    state_root,
+                    self._candidate.candidate_digest,
+                ),
+                "publication_revision": revision,
+            }
+
+        runs: list[dict[str, Any]] = []
+        runs_root = state_root / "model-runs"
+        if runs_root.is_dir():
+            for path in sorted(runs_root.glob("*.projection.json")):
+                value = _load_unique_json(path)
+                if not isinstance(value, dict):
+                    raise ValueError("MODEL_RUN_PROJECTION_INVALID")
+                allowed = {
+                    "run_id",
+                    "family",
+                    "state",
+                    "progress_percent",
+                    "artifact_digest",
+                    "error_code",
+                }
+                if set(value) != allowed or not _valid_model_projection(value):
+                    raise ValueError("MODEL_RUN_PROJECTION_INVALID")
+                runs.append({key: value[key] for key in allowed})
+        return {"revision": revision, "current_candidate": current_candidate, "runs": runs}
+
     def active_campaign(self) -> bool:
         try:
             return self.projection()["current"]["campaign_state"] in {"starting", "active"}
@@ -712,6 +787,58 @@ def _load_candidate(path: Path) -> DemoCandidate | None:
         symbols=tuple(value["symbols"]),
         calendar_sessions=sessions,
         lifecycle_revision=value["lifecycle_revision"],
+    )
+
+
+def _candidate_family(state_root: Path, candidate_digest: str) -> str:
+    path = state_root / "candidate-family.json"
+    if not path.is_file():
+        return "unknown"
+    value = _load_unique_json(path)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"candidate_digest", "family"}
+        or not isinstance(value["candidate_digest"], str)
+        or _DIGEST.fullmatch(value["candidate_digest"]) is None
+        or value["candidate_digest"] != candidate_digest
+        or value["family"] not in {"rule", "factor", "lasso", "lightgbm", "mlp"}
+    ):
+        raise ValueError("DEMO_CANDIDATE_FAMILY_INVALID")
+    return str(value["family"])
+
+
+def _valid_model_projection(value: dict[str, Any]) -> bool:
+    artifact = value.get("artifact_digest")
+    error_code = value.get("error_code")
+    return (
+        isinstance(value.get("run_id"), str)
+        and 1 <= len(value["run_id"]) <= 128
+        and value.get("family") in {"rule", "factor", "lasso", "lightgbm", "mlp"}
+        and value.get("state")
+        in {
+            "prepared",
+            "admitted",
+            "running",
+            "trained",
+            "calibrated",
+            "evaluated",
+            "failed",
+            "cancelled",
+            "blocked",
+        }
+        and isinstance(value.get("progress_percent"), int)
+        and not isinstance(value.get("progress_percent"), bool)
+        and 0 <= value["progress_percent"] <= 100
+        and (
+            artifact is None
+            or isinstance(artifact, str)
+            and _DIGEST.fullmatch(artifact) is not None
+        )
+        and (
+            error_code is None
+            or isinstance(error_code, str)
+            and re.fullmatch(r"[A-Z][A-Z0-9_]{2,127}", error_code) is not None
+        )
     )
 
 

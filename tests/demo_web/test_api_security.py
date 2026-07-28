@@ -130,6 +130,7 @@ def test_routes_are_allowlisted_and_forbidden_trading_surfaces_do_not_exist() ->
         "/api/v1/campaigns/{campaign_id}/pause",
         "/api/v1/emergency-stop",
         "/api/v1/evidence/{campaign_id}",
+        "/api/v1/models",
         "/api/v1/research/tasks",
         "/api/v1/research/tasks/{task_id}/cancel",
         "/api/v1/chat/messages",
