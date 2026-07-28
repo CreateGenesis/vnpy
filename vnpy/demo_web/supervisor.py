@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import socket
 from threading import RLock
 from time import monotonic, sleep
 from typing import Any, Protocol
@@ -168,14 +169,23 @@ class LocalProcessRuntime:
         while True:
             if self.inspect(identity.pid) != identity:
                 return False
-            if spec.service is not ServiceName.WEB:
-                return True
-            try:
-                with urlopen(endpoint, timeout=1) as response:  # noqa: S310 - fixed loopback spec
-                    if response.status == 200:
+            if spec.service is ServiceName.RQDATA_FETCHER:
+                try:
+                    address = endpoint.removeprefix("tcp://")
+                    host, port_text = address.rsplit(":", 1)
+                    with socket.create_connection((host, int(port_text)), timeout=1):
                         return True
-            except OSError:
-                pass
+                except (OSError, ValueError):
+                    pass
+            elif spec.service is not ServiceName.WEB:
+                return True
+            else:
+                try:
+                    with urlopen(endpoint, timeout=1) as response:  # noqa: S310 - fixed loopback spec
+                        if response.status == 200:
+                            return True
+                except OSError:
+                    pass
             if monotonic() >= deadline:
                 return False
             sleep(0.1)

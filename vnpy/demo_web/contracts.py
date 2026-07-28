@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 _DIGEST = r"^(?:sha256|blake3):[0-9a-f]{64}$"
@@ -63,14 +63,22 @@ class PortsSection(StrictModel):
     model_tora: int = Field(default=8783, ge=1, le=65_535)
     run_xtp: int = Field(default=8784, ge=1, le=65_535)
     run_tora: int = Field(default=8785, ge=1, le=65_535)
+    rqdata_fetcher: int = Field(default=8786, ge=1, le=65_535)
 
-    @field_validator("run_tora")
-    @classmethod
-    def ports_are_unique(cls, value: int, info: Any) -> int:
-        values = [item for item in info.data.values() if isinstance(item, int)] + [value]
+    @model_validator(mode="after")
+    def ports_are_unique(self) -> "PortsSection":
+        values = [
+            self.web,
+            self.agentd,
+            self.model_xtp,
+            self.model_tora,
+            self.run_xtp,
+            self.run_tora,
+            self.rqdata_fetcher,
+        ]
         if len(values) != len(set(values)):
             raise ValueError("CONFIGURATION_PORT_DUPLICATE")
-        return value
+        return self
 
 
 class RqdataSection(StrictModel):

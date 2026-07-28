@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from .configuration import (
@@ -14,6 +15,7 @@ from .configuration_tests import ConfigurationSectionTester
 from .contracts import OperationRejected, ServiceName, build_action_catalog
 from .gateway_control import GatewayControlError, GatewayControlService
 from .supervisor import FixedServiceSupervisor, SupervisorError
+from .supervisor_ipc import SupervisorIpcError
 
 
 class OperationsService:
@@ -40,10 +42,15 @@ class OperationsService:
         active = self._configuration.read_active()
         draft = self._configuration.read_draft()
         services = []
-        for service in (ServiceName.RESEARCH, ServiceName.MODEL_XTP, ServiceName.MODEL_TORA):
+        for service in (
+            ServiceName.RESEARCH,
+            ServiceName.MODEL_XTP,
+            ServiceName.MODEL_TORA,
+            ServiceName.RQDATA_FETCHER,
+        ):
             try:
                 services.append(self._supervisor.reconcile(service))
-            except SupervisorError:
+            except (SupervisorError, SupervisorIpcError):
                 services.append(
                     {"service": service.value, "state": "unconfigured", "revision": 0, "error_code": None}
                 )
@@ -144,6 +151,29 @@ class OperationsService:
         command: dict[str, Any],
     ) -> dict[str, Any]:
         try:
+            if service == ServiceName.RQDATA_FETCHER.value and action in {
+                "start",
+                "restart",
+            }:
+                payload = self._rqdata_launch_payload()
+                handler = getattr(
+                    self._supervisor,
+                    "handle_with_secret",
+                    getattr(self._supervisor, "handle_secret", None),
+                )
+                if not callable(handler):
+                    raise SupervisorError("SUPERVISOR_SECRET_CONTROL_UNAVAILABLE")
+                try:
+                    return handler(
+                        {
+                            "service": service,
+                            "action": action,
+                            "expected_revision": command["expected_revision"],
+                        },
+                        payload,
+                    )
+                finally:
+                    del payload
             return self._supervisor.handle(
                 {
                     "service": service,
@@ -151,8 +181,51 @@ class OperationsService:
                     "expected_revision": command["expected_revision"],
                 }
             )
-        except SupervisorError as exc:
+        except (SupervisorError, SupervisorIpcError) as exc:
             raise OperationRejected(str(exc)) from exc
+
+    def _rqdata_launch_payload(self) -> bytes:
+        active = self._configuration.read_active()
+        public = active.get("sections", {}).get("rqdata")
+        secret_reader = getattr(
+            self._configuration,
+            "read_active_section_secrets",
+            None,
+        )
+        try:
+            secrets = secret_reader("rqdata") if callable(secret_reader) else {}
+        except Exception as exc:
+            raise OperationRejected("RQDATA_CONFIGURATION_NOT_ACTIVE") from exc
+        if (
+            active.get("state") != "active"
+            or not isinstance(active.get("version"), int)
+            or isinstance(active.get("version"), bool)
+            or active["version"] < 1
+            or not isinstance(active.get("configuration_digest"), str)
+            or not isinstance(active.get("operator_identity_digest"), str)
+            or not isinstance(public, dict)
+            or set(public) != {"endpoint", "tick_required"}
+            or public.get("tick_required") is not True
+            or not isinstance(public.get("endpoint"), str)
+            or not isinstance(secrets, dict)
+            or set(secrets) != {"username", "password"}
+            or not all(isinstance(value, str) and value for value in secrets.values())
+        ):
+            raise OperationRejected("RQDATA_CONFIGURATION_NOT_ACTIVE")
+        return json.dumps(
+            {
+                "contract_version": 1,
+                "configuration_version": active["version"],
+                "configuration_digest": active["configuration_digest"],
+                "operator_identity_digest": active["operator_identity_digest"],
+                "public": public,
+                "secrets": secrets,
+            },
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
 
     def control_gateway(
         self,

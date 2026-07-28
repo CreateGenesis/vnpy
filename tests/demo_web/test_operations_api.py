@@ -122,6 +122,11 @@ def test_section_activation_and_fixed_service_routes_require_write_guards() -> N
         headers=headers(),
     ).status_code == 202
     assert api.post(
+        "/api/v1/services/rqdata_fetcher/start",
+        json={"expected_revision": 3, "idempotency_key": "service-start-rqdata-01"},
+        headers=headers(),
+    ).status_code == 202
+    assert api.post(
         "/api/v1/services/web/start",
         json={"expected_revision": 3, "idempotency_key": "service-start-0002"},
         headers=headers(),

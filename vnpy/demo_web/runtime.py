@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 from secrets import token_urlsafe
 import subprocess
+import sys
 from threading import RLock
 from time import time_ns
 from typing import Any, Protocol
@@ -940,6 +941,24 @@ def _service_specs(root: Path, configuration_version: int) -> dict[ServiceName, 
             endpoint_template="local://modeld-tora",
             configuration_version=configuration_version,
             working_directory=rust,
+        ),
+        ServiceName.RQDATA_FETCHER: ServiceSpec(
+            service=ServiceName.RQDATA_FETCHER,
+            executable=Path(sys.executable),
+            executable_digest=_executable_digest(Path(sys.executable)),
+            argument_template=(
+                "-m",
+                "vnpy.model_production.rqdata_snapshot",
+                "--project-root",
+                str(root),
+                "serve",
+                "--address",
+                "127.0.0.1:8786",
+            ),
+            endpoint_template="tcp://127.0.0.1:8786",
+            configuration_version=configuration_version,
+            working_directory=root / "vnpy",
+            health_timeout_seconds=20.0,
         ),
     }
 

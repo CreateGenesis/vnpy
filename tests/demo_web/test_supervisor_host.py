@@ -31,6 +31,10 @@ def test_supervisor_registry_contains_only_fixed_service_templates(tmp_path: Pat
     )
     assert specs[ServiceName.RUN_XTP].arguments()[-2:] == ("--address", "127.0.0.1:8784")
     assert specs[ServiceName.RUN_TORA].arguments()[-2:] == ("--address", "127.0.0.1:8785")
+    assert specs[ServiceName.RQDATA_FETCHER].arguments()[-2:] == (
+        "--address",
+        "127.0.0.1:8786",
+    )
     for spec in specs.values():
         assert spec.configuration_version == 3
         rendered = " ".join(spec.arguments()).lower()

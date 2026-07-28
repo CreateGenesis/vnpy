@@ -401,7 +401,7 @@ def create_demo_app(
             status_code=202,
         )
         def control_fixed_service(
-            service: Literal["research", "model_xtp", "model_tora"],
+            service: Literal["research", "model_xtp", "model_tora", "rqdata_fetcher"],
             action: Literal["start", "stop", "restart"],
             command: RevisionedOperationRequest,
         ) -> JSONResponse:

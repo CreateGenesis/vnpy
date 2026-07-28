@@ -38,6 +38,7 @@ def build_supervisor_specs(
         "model_tora": 8783,
         "run_xtp": 8784,
         "run_tora": 8785,
+        "rqdata_fetcher": 8786,
     }
     if ports is not None:
         for name in selected:
@@ -141,9 +142,12 @@ def build_supervisor_specs(
                 "--project-root",
                 str(root),
                 "serve",
+                "--address",
+                f"{host}:{selected['rqdata_fetcher']}",
             ),
-            endpoint_template="local://rqdata-fetcher",
+            endpoint_template=f"tcp://{host}:{selected['rqdata_fetcher']}",
             working_directory=root / "vnpy",
+            health_timeout_seconds=20.0,
             **shared,
         ),
     }
