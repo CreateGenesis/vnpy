@@ -4,4 +4,5 @@
 vnpy_xtp==2.2.32.2.3
 vnpy_tora==2026.5.14
 vnpy_webtrader==1.1.0
+rqdatac==3.5.6.1
 importlib-metadata==8.7.0

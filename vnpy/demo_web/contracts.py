@@ -74,7 +74,7 @@ class PortsSection(StrictModel):
 
 
 class RqdataSection(StrictModel):
-    endpoint: str = Field(default="https://rqdatac.com", min_length=8, max_length=512)
+    endpoint: str = Field(default="rqdatad-pro.ricequant.com:16011", min_length=8, max_length=512)
     tick_required: bool = True
 
 
