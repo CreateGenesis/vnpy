@@ -25,6 +25,7 @@ from .configuration import ConfigurationStore
 from .configuration_tests import ConfigurationSectionTester
 from .gateway_control import GatewayControlService
 from .guidance import GuidanceClientBinding, SideMasterGuidanceClient
+from .research import ResearchClientBinding, ResearchTaskClient
 from .projection import (
     CandidateProjectionInput,
     DemoProjectionInput,
@@ -70,6 +71,7 @@ class DemoRuntime:
     config: DemoWebConfig
     backend: ConcreteDemoBackend
     guidance: SideMasterGuidanceClient | None
+    research: ResearchTaskClient | None
     operations: OperationsService
     security: BootstrapSessionManager
     bootstrap_fragment_token: str
@@ -528,10 +530,18 @@ def build_demo_runtime(
     guidance_token_path = root / ".agent-state" / "demo-guidance-ipc-token"
     guidance_descriptor: dict[str, Any] | None = None
     guidance_transport: LengthPrefixedJsonTransport | None = None
+    research_transport: LengthPrefixedJsonTransport | None = None
     if guidance_endpoint.exists() or guidance_token_path.exists():
         guidance_descriptor = _load_endpoint(guidance_endpoint, gateway=None)
+        guidance_token = _load_token(guidance_token_path)
         guidance_transport = LengthPrefixedJsonTransport(
-            _load_token(guidance_token_path), timeout_seconds=120
+            guidance_token,
+            timeout_seconds=120,
+        )
+        research_transport = LengthPrefixedJsonTransport(
+            guidance_token,
+            timeout_seconds=120,
+            request_kind="research_command",
         )
 
     config = DemoWebConfig(
@@ -589,17 +599,31 @@ def build_demo_runtime(
     )
     backend_holder["backend"] = backend
     guidance = None
-    if guidance_descriptor is not None and guidance_transport is not None:
+    research = None
+    if (
+        guidance_descriptor is not None
+        and guidance_transport is not None
+        and research_transport is not None
+    ):
+        operator_identity_digest = _load_operator_digest(
+            root / ".demo-secrets" / "operator.json"
+        )
         guidance = SideMasterGuidanceClient(
             GuidanceClientBinding(
                 endpoint=f"tcp://{guidance_descriptor['address']}",
-                operator_identity_digest=_load_operator_digest(
-                    root / ".demo-secrets" / "operator.json"
-                ),
+                operator_identity_digest=operator_identity_digest,
             ),
             guidance_transport,
             active_campaign=backend.active_campaign,
             next_safe_boundary_revision=backend.next_safe_boundary_revision,
+        )
+        research = ResearchTaskClient(
+            ResearchClientBinding(
+                endpoint=f"tcp://{guidance_descriptor['address']}",
+                operator_identity_digest=operator_identity_digest,
+            ),
+            research_transport,
+            active_campaign=backend.active_campaign,
         )
     operations = OperationsService(
         configuration,
@@ -623,6 +647,7 @@ def build_demo_runtime(
         config=config,
         backend=backend,
         guidance=guidance,
+        research=research,
         operations=operations,
         security=security,
         bootstrap_fragment_token=fragment_token,

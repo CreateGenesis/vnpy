@@ -48,6 +48,7 @@ def main() -> None:
         runtime.guidance,
         security=runtime.security,
         operations=runtime.operations,
+        research=runtime.research,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

@@ -19,14 +19,18 @@ class LengthPrefixedJsonTransport:
         *,
         timeout_seconds: float = 5.0,
         maximum_bytes: int = 1_048_576,
+        request_kind: str = "demo_command",
     ) -> None:
         if not 24 <= len(transport_token) <= 512 or not transport_token.isascii():
             raise ValueError("IPC_TOKEN_INVALID")
         if not 0.1 <= timeout_seconds <= 120 or not 1_024 <= maximum_bytes <= 8_388_608:
             raise ValueError("IPC_CONFIGURATION_INVALID")
+        if request_kind not in {"demo_command", "research_command"}:
+            raise ValueError("IPC_REQUEST_KIND_INVALID")
         self._transport_token = transport_token
         self._timeout_seconds = timeout_seconds
         self._maximum_bytes = maximum_bytes
+        self._request_kind = request_kind
 
     def request(
         self,
@@ -38,7 +42,7 @@ class LengthPrefixedJsonTransport:
         if not operation or len(operation) > 128 or not isinstance(payload, dict):
             raise ValueError("IPC_REQUEST_INVALID")
         envelope = {
-            "kind": "demo_command",
+            "kind": self._request_kind,
             "transport_version": 1,
             "transport_token": self._transport_token,
             "operation": operation,

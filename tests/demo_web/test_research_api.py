@@ -7,6 +7,10 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from vnpy.demo_web.app import DemoWebConfig, create_demo_app
+from vnpy.demo_web.research import (
+    ResearchClientBinding,
+    ResearchTaskClient,
+)
 
 
 SESSION = "s" * 48
@@ -41,6 +45,22 @@ def task(state: str = "queued") -> dict[str, Any]:
         "not_before_boundary": "campaign_terminal",
         "state": state,
     }
+
+
+def operator_task(state: str = "queued") -> dict[str, Any]:
+    value = task(state)
+    value.update(
+        {
+            "source": "operator",
+            "source_digest": digest("operator-request"),
+            "operator_confirmation_digest": digest("operator-confirmation"),
+            "constraints": ["research_only"],
+            "data_references": [digest("snapshot")],
+            "author_lineage_digest": digest("operator"),
+            "not_before_boundary": "immediate_safe_boundary",
+        }
+    )
+    return value
 
 
 @dataclass
@@ -108,6 +128,32 @@ class Guidance:
             "idempotency_key": command["idempotency_key"],
             "decision_digest": digest(f"decision:{decision}"),
         }
+
+
+@dataclass
+class AgentdResearchTransport:
+    calls: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
+
+    def request(
+        self,
+        endpoint: str,
+        operation: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append((endpoint, operation, payload))
+        response: dict[str, Any] = {
+            "contract_version": 1,
+            "status": "ok",
+            "operation": operation,
+            "authority": "research_only",
+        }
+        if operation == "demo.research.tasks.list.v1":
+            response["tasks"] = [task()]
+        elif operation == "demo.research.tasks.create.v1":
+            response["task"] = operator_task()
+        else:
+            response["task"] = operator_task("cancelled")
+        return response
 
 
 def client(research: Research, *, guidance: Guidance | None = None) -> TestClient:
@@ -189,6 +235,31 @@ def test_confirmed_proposal_projects_the_created_research_task() -> None:
     assert response.json()["data"]["research_task"] == task()
 
 
+def test_research_client_unwraps_authenticated_agentd_responses() -> None:
+    transport = AgentdResearchTransport()
+    research = ResearchTaskClient(
+        ResearchClientBinding(
+            endpoint="tcp://127.0.0.1:18801",
+            operator_identity_digest=digest("operator"),
+        ),
+        transport,
+        active_campaign=lambda: False,
+        clock_ms=lambda: 2_000,
+    )
+
+    listed = research.list_tasks()
+    created = research.create_task(create_body())
+    cancelled = research.cancel_task(TASK_ID, cancel_body())
+
+    assert listed["tasks"] == [task()]
+    assert isinstance(listed["revision"], int)
+    assert 0 <= listed["revision"] < 2**53
+    assert created["task"] == operator_task()
+    assert cancelled["task"] == operator_task("cancelled")
+    assert transport.calls[1][2]["operator_identity_digest"] == digest("operator")
+    assert transport.calls[1][2]["active_campaign"] is False
+
+
 def test_research_responses_fail_closed_on_secrets_and_trading_fields() -> None:
     api = client(Research(leak=True))
     response = api.get("/api/v1/research/tasks")
@@ -210,4 +281,3 @@ def test_event_stream_includes_a_redacted_research_projection() -> None:
         "event": "research.snapshot",
         "data": {"revision": 4, "tasks": [task()]},
     }
-

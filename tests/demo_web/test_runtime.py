@@ -42,6 +42,7 @@ def test_runtime_starts_blocked_without_candidate_or_local_services(tmp_path: Pa
     assert projection["current"]["campaign_state"] == "unavailable"
     assert projection["permitted_actions"] == ["emergency_stop"]
     assert runtime.guidance is None
+    assert runtime.research is None
     assert system["configuration"] == {
         "state": "unconfigured",
         "active_version": 0,
@@ -79,6 +80,43 @@ def test_runtime_uses_remote_supervisor_client_when_address_and_key_are_supplied
 
     assert created == [(('127.0.0.1', 8755), b"s" * 32)]
     assert runtime.operations.system()["services"][0]["state"] == "stopped"
+
+
+def test_runtime_binds_guidance_and_research_to_the_agentd_endpoint(
+    tmp_path: Path,
+) -> None:
+    agent_state = tmp_path / ".agent-state"
+    agent_state.mkdir()
+    (agent_state / "guidance-endpoint.json").write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "transport": "tcp-loopback",
+                "address": "127.0.0.1:18801",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (agent_state / "demo-guidance-ipc-token").write_text(
+        "demo-guidance-token-value-00000001",
+        encoding="ascii",
+    )
+    secret_root = tmp_path / ".demo-secrets"
+    secret_root.mkdir()
+    (secret_root / "operator.json").write_text(
+        json.dumps(
+            {
+                "contract_version": 1,
+                "operator_identity_digest": digest("operator"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime = build_demo_runtime(tmp_path, host="127.0.0.1", port=8765)
+
+    assert runtime.guidance is not None
+    assert runtime.research is not None
 
 
 def test_runtime_rejects_malformed_candidate_and_non_loopback_descriptors(
@@ -168,6 +206,48 @@ def test_length_prefixed_transport_authenticates_and_round_trips_strict_json() -
             "payload": {"content": "research only"},
         }
     ]
+
+
+def test_length_prefixed_transport_uses_the_research_command_lane() -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    address = listener.getsockname()
+    captured: list[dict[str, Any]] = []
+
+    def serve() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            size = struct.unpack(">I", _read_exact(connection, 4))[0]
+            request = json.loads(_read_exact(connection, size))
+            captured.append(request)
+            response = json.dumps(
+                {
+                    "contract_version": 1,
+                    "status": "ok",
+                    "operation": request["operation"],
+                    "authority": "research_only",
+                    "tasks": [],
+                }
+            ).encode()
+            connection.sendall(struct.pack(">I", len(response)) + response)
+        listener.close()
+
+    thread = Thread(target=serve)
+    thread.start()
+    transport = LengthPrefixedJsonTransport(
+        "local-secret-token-value-00000001",
+        request_kind="research_command",
+    )
+    result = transport.request(
+        f"tcp://{address[0]}:{address[1]}",
+        "demo.research.tasks.list.v1",
+        {},
+    )
+    thread.join(timeout=2)
+
+    assert result["authority"] == "research_only"
+    assert captured[0]["kind"] == "research_command"
 
 
 def test_transport_rejects_http_and_remote_endpoints() -> None:
