@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`;
+const bootstrapToken = "bootstrap-token-0123456789abcdef0123456789abcdef";
+const csrfToken = "operations-csrf-token-0123456789abcdef0123456789abcdef";
 
 const projection = {
   contract_version: 1,
@@ -125,6 +127,10 @@ async function installOperationsBackend(page: Page) {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     const body = request.method() === "GET" ? {} : request.postDataJSON() as Record<string, unknown>;
+    if (request.method() === "POST" && path === "/api/v1/bootstrap/exchange") {
+      expect(body).toEqual({ fragment_token: bootstrapToken });
+      return route.fulfill({ json: envelope({ csrf_token: csrfToken }) });
+    }
     if (request.method() === "POST") posts.push({ path, body });
     if (request.method() === "PUT") puts.push({ path, body });
 
@@ -229,17 +235,16 @@ async function installOperationsBackend(page: Page) {
   return { posts, puts, state };
 }
 
-async function establishTestSession(page: Page): Promise<void> {
-  await page.locator('meta[name="auto-trade-csrf"]').evaluate((element) => {
-    element.setAttribute("content", "operations-csrf-token-0123456789abcdef0123456789abcdef");
-  });
+async function openOperationsConsole(page: Page): Promise<void> {
+  await page.goto(`/#bootstrap=${bootstrapToken}`);
+  await expect(page.locator('meta[name="auto-trade-csrf"]')).toHaveAttribute("content", csrfToken);
+  await expect(page).toHaveURL("/");
 }
 
 
 test("settings draft, tests, activation, and port handoff are operable", async ({ page }) => {
   const backend = await installOperationsBackend(page);
-  await page.goto("/");
-  await establishTestSession(page);
+  await openOperationsConsole(page);
   const navigationFits = await page.getByRole("tablist", { name: "工作视图" }).evaluate(
     (element) => element.scrollWidth <= element.clientWidth,
   );
@@ -266,8 +271,7 @@ test("settings draft, tests, activation, and port handoff are operable", async (
 
 test("independent gateways, selected campaign, research, model pipeline, and restart work", async ({ page }) => {
   const backend = await installOperationsBackend(page);
-  await page.goto("/");
-  await establishTestSession(page);
+  await openOperationsConsole(page);
 
   await page.getByRole("tab", { name: "概览" }).click();
   await page.getByRole("button", { name: "启动研究服务" }).click();

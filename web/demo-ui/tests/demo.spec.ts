@@ -1,6 +1,8 @@
 import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`;
+const bootstrapToken = "acceptance-bootstrap-0123456789abcdef0123456789abcdef";
+const csrfToken = "acceptance-csrf-token-0123456789abcdef0123456789abcdef";
 
 const gateway = (name: "XTP" | "TORA", profit: number) => ({
   gateway: name,
@@ -175,6 +177,11 @@ async function installDeterministicBackend(page: Page) {
   await page.route("**/api/v1/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (request.method() === "POST" && path === "/api/v1/bootstrap/exchange") {
+      expect(request.postDataJSON()).toEqual({ fragment_token: bootstrapToken });
+      await route.fulfill({ json: envelope({ csrf_token: csrfToken }) });
+      return;
+    }
     if (request.method() === "POST") posts.push(path);
     if (path === "/api/v1/system") {
       await route.fulfill({ json: envelope(system) });
@@ -208,11 +215,10 @@ test("desktop and mobile control, reconnect, chart, and screenshot acceptance", 
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const backend = await installDeterministicBackend(page);
 
-  await page.goto("/");
+  await page.goto(`/#bootstrap=${bootstrapToken}`);
   await expect(page.getByRole("heading", { name: "运行概览" })).toBeVisible();
-  await page.locator('meta[name="auto-trade-csrf"]').evaluate((element) => {
-    element.setAttribute("content", "acceptance-csrf-token-0123456789abcdef0123456789abcdef");
-  });
+  await expect(page.locator('meta[name="auto-trade-csrf"]')).toHaveAttribute("content", csrfToken);
+  await expect(page).toHaveURL("/");
   await expect(page.getByText("实时连接")).toBeVisible();
 
   await page.getByRole("tab", { name: "证据" }).click();
