@@ -39,6 +39,7 @@ from .supervisor import (
     LocalProcessRuntime,
     ServiceSpec,
 )
+from .supervisor_ipc import SupervisorIpcClient
 from .contracts import ServiceName
 from .transport import LengthPrefixedJsonTransport
 
@@ -431,7 +432,14 @@ class ConcreteDemoBackend:
         )
 
 
-def build_demo_runtime(project_root: str | Path, *, host: str, port: int) -> DemoRuntime:
+def build_demo_runtime(
+    project_root: str | Path,
+    *,
+    host: str,
+    port: int,
+    supervisor_address: tuple[str, int] | None = None,
+    supervisor_authentication_key: bytes | None = None,
+) -> DemoRuntime:
     root = Path(project_root).resolve(strict=False)
     if host != "127.0.0.1" or not 1 <= port <= 65_535:
         raise ValueError("DEMO_LOOPBACK_BIND_REQUIRED")
@@ -499,10 +507,19 @@ def build_demo_runtime(project_root: str | Path, *, host: str, port: int) -> Dem
     )
     tester = ConfigurationSectionTester(current_operator_sid=lambda: _current_operator_sid())
     active_version = max(1, int(configuration.read_active().get("version", 0)))
-    supervisor = FixedServiceSupervisor(
-        root / ".operations-state" / "supervisor",
-        specs=_service_specs(root, active_version),
-        runtime=LocalProcessRuntime(),
+    if (supervisor_address is None) != (supervisor_authentication_key is None):
+        raise ValueError("SUPERVISOR_IPC_CONFIGURATION_INVALID")
+    supervisor = (
+        SupervisorIpcClient(
+            supervisor_address,
+            authentication_key=supervisor_authentication_key,
+        )
+        if supervisor_address is not None and supervisor_authentication_key is not None
+        else FixedServiceSupervisor(
+            root / ".operations-state" / "supervisor",
+            specs=_service_specs(root, active_version),
+            runtime=LocalProcessRuntime(),
+        )
     )
     operations = OperationsService(
         configuration,

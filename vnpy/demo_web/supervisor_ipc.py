@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from base64 import b64encode
 from hashlib import sha256
 import hmac
 import json
 from secrets import token_urlsafe
+import socket
+from socketserver import BaseRequestHandler, ThreadingTCPServer
 from threading import RLock
 from time import time_ns
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
+
+from .contracts import ServiceName
+from .supervisor import SupervisorError
 
 
 class SupervisorIpcError(RuntimeError):
@@ -104,6 +110,18 @@ class AuthenticatedSupervisorIpc:
                 or isinstance(payload.get("expected_revision"), bool)
             ):
                 raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED")
+        elif operation == "health":
+            if set(payload) != {"service"} or payload.get("service") not in _SERVICES:
+                raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED")
+        elif operation == "secret_lease":
+            lease_id = payload.get("lease_id")
+            if (
+                set(payload) != {"service", "lease_id"}
+                or payload.get("service") not in _SERVICES
+                or not isinstance(lease_id, str)
+                or not 16 <= len(lease_id) <= 256
+            ):
+                raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED")
 
 
 @dataclass
@@ -166,3 +184,205 @@ def _canonical(value: dict[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
+
+
+class SupervisorController(Protocol):
+    def handle(self, command: dict[str, Any]) -> dict[str, Any]: ...
+
+    def reconcile(self, service: ServiceName) -> dict[str, Any]: ...
+
+
+class SupervisorIpcServer(ThreadingTCPServer):
+    """Bounded loopback RPC server owned by the trusted Supervisor process."""
+
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        *,
+        authentication_key: bytes,
+        supervisor: SupervisorController,
+        secret_leases: SecretLeaseBroker | None = None,
+    ) -> None:
+        if address[0] != "127.0.0.1":
+            raise SupervisorIpcError("SUPERVISOR_IPC_LOOPBACK_REQUIRED")
+        self.authentication_key = bytes(authentication_key)
+        self.authenticator = AuthenticatedSupervisorIpc(self.authentication_key)
+        self.supervisor = supervisor
+        self.secret_leases = secret_leases or SecretLeaseBroker()
+        super().__init__(address, _SupervisorIpcRequestHandler, bind_and_activate=True)
+
+    def dispatch(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if operation == "service_control":
+            return self.supervisor.handle(payload)
+        if operation == "health":
+            try:
+                service = ServiceName(payload["service"])
+            except (KeyError, ValueError, TypeError) as exc:
+                raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED") from exc
+            return self.supervisor.reconcile(service)
+        if operation == "secret_lease":
+            value = self.secret_leases.consume(
+                payload["lease_id"], audience=payload["service"]
+            )
+            return {"value_base64": b64encode(value).decode("ascii")}
+        raise SupervisorIpcError("SUPERVISOR_IPC_OPERATION_DENIED")
+
+
+class _SupervisorIpcRequestHandler(BaseRequestHandler):
+    def handle(self) -> None:
+        server = self.server
+        if not isinstance(server, SupervisorIpcServer):
+            return
+        nonce = "invalid-request"
+        try:
+            self.request.settimeout(5.0)
+            encoded = _receive_line(self.request)
+            envelope = json.loads(encoded, object_pairs_hook=_unique_object)
+            if not isinstance(envelope, dict):
+                raise SupervisorIpcError("SUPERVISOR_IPC_ENVELOPE_INVALID")
+            raw_nonce = envelope.get("nonce")
+            if isinstance(raw_nonce, str) and raw_nonce:
+                nonce = raw_nonce
+            payload = server.authenticator.verify(envelope)
+            result = server.dispatch(envelope["operation"], payload)
+            response = _signed_response(
+                server.authentication_key,
+                request_nonce=nonce,
+                ok=True,
+                payload=result,
+            )
+        except (SupervisorIpcError, SupervisorError) as exc:
+            code = str(exc).split(":", 1)[0]
+            if not code.isupper():
+                code = "SUPERVISOR_IPC_REQUEST_FAILED"
+            response = _signed_response(
+                server.authentication_key,
+                request_nonce=nonce,
+                ok=False,
+                payload={"code": code},
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            response = _signed_response(
+                server.authentication_key,
+                request_nonce=nonce,
+                ok=False,
+                payload={"code": "SUPERVISOR_IPC_ENVELOPE_INVALID"},
+            )
+        try:
+            self.request.sendall(_canonical(response) + b"\n")
+        except OSError:
+            return
+
+
+class SupervisorIpcClient:
+    """Fixed-operation client used by the Web child."""
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        *,
+        authentication_key: bytes,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        if address[0] != "127.0.0.1" or not 1 <= address[1] <= 65_535:
+            raise SupervisorIpcError("SUPERVISOR_IPC_LOOPBACK_REQUIRED")
+        self._address = address
+        self._key = bytes(authentication_key)
+        self._authenticator = AuthenticatedSupervisorIpc(self._key)
+        self._timeout_seconds = timeout_seconds
+
+    def request(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        nonce = token_urlsafe(24)
+        envelope = self._authenticator.sign(
+            operation,
+            payload,
+            nonce=nonce,
+            expires_at_ms=(time_ns() // 1_000_000) + 10_000,
+        )
+        try:
+            with socket.create_connection(self._address, timeout=self._timeout_seconds) as connection:
+                connection.settimeout(self._timeout_seconds)
+                connection.sendall(_canonical(envelope) + b"\n")
+                connection.shutdown(socket.SHUT_WR)
+                response = json.loads(
+                    _receive_line(connection),
+                    object_pairs_hook=_unique_object,
+                )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise SupervisorIpcError("SUPERVISOR_IPC_UNAVAILABLE") from exc
+        payload_out = _verify_response(self._key, response, request_nonce=nonce)
+        if response["ok"] is not True:
+            raise SupervisorIpcError(str(payload_out.get("code", "SUPERVISOR_IPC_REQUEST_FAILED")))
+        return payload_out
+
+    def handle(self, command: dict[str, Any]) -> dict[str, Any]:
+        return self.request("service_control", command)
+
+    def reconcile(self, service: ServiceName) -> dict[str, Any]:
+        return self.request("health", {"service": service.value})
+
+
+def _receive_line(connection: socket.socket) -> str:
+    chunks = bytearray()
+    while len(chunks) <= 65_536:
+        block = connection.recv(min(4096, 65_537 - len(chunks)))
+        if not block:
+            break
+        chunks.extend(block)
+        if b"\n" in block:
+            break
+    if not chunks.endswith(b"\n") or len(chunks) > 65_536 or chunks.count(b"\n") != 1:
+        raise SupervisorIpcError("SUPERVISOR_IPC_ENVELOPE_INVALID")
+    return chunks[:-1].decode("utf-8")
+
+
+def _signed_response(
+    key: bytes,
+    *,
+    request_nonce: str,
+    ok: bool,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    unsigned = {
+        "contract_version": 1,
+        "request_nonce": request_nonce,
+        "ok": ok,
+        "payload": payload,
+    }
+    return {**unsigned, "authentication": hmac.new(key, _canonical(unsigned), sha256).hexdigest()}
+
+
+def _verify_response(
+    key: bytes,
+    response: Any,
+    *,
+    request_nonce: str,
+) -> dict[str, Any]:
+    required = {"contract_version", "request_nonce", "ok", "payload", "authentication"}
+    if (
+        not isinstance(response, dict)
+        or set(response) != required
+        or response.get("contract_version") != 1
+        or response.get("request_nonce") != request_nonce
+        or not isinstance(response.get("ok"), bool)
+        or not isinstance(response.get("payload"), dict)
+        or not isinstance(response.get("authentication"), str)
+    ):
+        raise SupervisorIpcError("SUPERVISOR_IPC_RESPONSE_INVALID")
+    unsigned = {key_name: response[key_name] for key_name in required - {"authentication"}}
+    expected = hmac.new(key, _canonical(unsigned), sha256).hexdigest()
+    if not hmac.compare_digest(response["authentication"], expected):
+        raise SupervisorIpcError("SUPERVISOR_IPC_RESPONSE_AUTHENTICATION_FAILED")
+    return dict(response["payload"])
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON key")
+        value[key] = item
+    return value

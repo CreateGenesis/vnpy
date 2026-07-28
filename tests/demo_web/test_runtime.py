@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from vnpy.demo_web.contracts import ServiceName
 from vnpy.demo_web.run_clients import BrokerSimulationRunClient, RunClientBinding
 from vnpy.demo_web.runtime import (
     ConcreteDemoBackend,
@@ -51,6 +52,35 @@ def test_runtime_starts_blocked_without_candidate_or_local_services(tmp_path: Pa
     assert len(system["actions"]) >= 20
     assert all(action["action_id"] for action in system["actions"])
     assert len(runtime.bootstrap_fragment_token) >= 32
+
+
+def test_runtime_uses_remote_supervisor_client_when_address_and_key_are_supplied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[tuple[tuple[str, int], bytes]] = []
+
+    class Client:
+        def __init__(self, address: tuple[str, int], *, authentication_key: bytes) -> None:
+            created.append((address, authentication_key))
+
+        def reconcile(self, service: ServiceName) -> dict[str, object]:
+            return {"service": service.value, "state": "stopped", "revision": 0}
+
+        def handle(self, command: dict[str, object]) -> dict[str, object]:
+            return command
+
+    monkeypatch.setattr("vnpy.demo_web.runtime.SupervisorIpcClient", Client)
+    runtime = build_demo_runtime(
+        tmp_path,
+        host="127.0.0.1",
+        port=8765,
+        supervisor_address=("127.0.0.1", 8755),
+        supervisor_authentication_key=b"s" * 32,
+    )
+
+    assert created == [(('127.0.0.1', 8755), b"s" * 32)]
+    assert runtime.operations.system()["services"][0]["state"] == "stopped"
 
 
 def test_runtime_rejects_malformed_candidate_and_non_loopback_descriptors(

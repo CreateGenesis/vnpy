@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 from threading import RLock
-from time import sleep
+from time import monotonic, sleep
 from typing import Any, Protocol
 from urllib.request import urlopen
 
@@ -37,6 +37,7 @@ class ServiceSpec:
     configuration_version: int
     default_port: int | None = None
     working_directory: Path | None = None
+    health_timeout_seconds: float = 0.0
 
     def validate(self) -> None:
         if (
@@ -45,6 +46,7 @@ class ServiceSpec:
             or self.configuration_version < 1
             or any(not isinstance(value, str) for value in self.argument_template)
             or ("{port}" in self.endpoint_template and self.default_port is None)
+            or not 0 <= self.health_timeout_seconds <= 120
         ):
             raise SupervisorError("SUPERVISOR_SPEC_INVALID")
 
@@ -132,15 +134,21 @@ class LocalProcessRuntime:
             os.kill(pid, 15)
 
     def healthy(self, spec: ServiceSpec, identity: ProcessIdentity, endpoint: str) -> bool:
-        if self.inspect(identity.pid) != identity:
-            return False
-        if spec.service is not ServiceName.WEB:
-            return True
-        try:
-            with urlopen(endpoint, timeout=1) as response:  # noqa: S310 - fixed loopback spec
-                return response.status == 200
-        except OSError:
-            return False
+        deadline = monotonic() + spec.health_timeout_seconds
+        while True:
+            if self.inspect(identity.pid) != identity:
+                return False
+            if spec.service is not ServiceName.WEB:
+                return True
+            try:
+                with urlopen(endpoint, timeout=1) as response:  # noqa: S310 - fixed loopback spec
+                    if response.status == 200:
+                        return True
+            except OSError:
+                pass
+            if monotonic() >= deadline:
+                return False
+            sleep(0.1)
 
 
 class FixedServiceSupervisor:
@@ -256,6 +264,8 @@ class FixedServiceSupervisor:
                 endpoint_template=base.endpoint_template,
                 configuration_version=configuration_version,
                 default_port=port,
+                working_directory=base.working_directory,
+                health_timeout_seconds=base.health_timeout_seconds,
             )
             replacement.validate()
             identity = self._runtime.spawn(replacement, replacement.arguments())
