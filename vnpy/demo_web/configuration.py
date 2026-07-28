@@ -141,6 +141,15 @@ class ConfigurationStore:
         with self._lock:
             return self._load_secrets().get(key)
 
+    def read_section_secrets(self, section: str) -> dict[str, str]:
+        with self._lock:
+            prefix = section + "."
+            return {
+                key[len(prefix) :]: value
+                for key, value in self._load_secrets().items()
+                if key.startswith(prefix)
+            }
+
     def update_draft(
         self,
         *,

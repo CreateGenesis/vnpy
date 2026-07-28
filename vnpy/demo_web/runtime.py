@@ -4,18 +4,24 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date
+import csv
+import getpass
 from hashlib import sha256
+from io import StringIO
 import json
 import os
 from pathlib import Path
 import re
 from secrets import token_urlsafe
+import subprocess
 from threading import RLock
 from time import time_ns
 from typing import Any
 from uuid import UUID, uuid4
 
 from .app import DemoWebConfig
+from .configuration import ConfigurationStore
+from .configuration_tests import ConfigurationSectionTester
 from .guidance import GuidanceClientBinding, SideMasterGuidanceClient
 from .projection import (
     CandidateProjectionInput,
@@ -26,6 +32,14 @@ from .projection import (
     PositionProjectionInput,
 )
 from .run_clients import BrokerSimulationRunClient, RunClientBinding
+from .operations import OperationsService
+from .security import BootstrapSessionManager
+from .supervisor import (
+    FixedServiceSupervisor,
+    LocalProcessRuntime,
+    ServiceSpec,
+)
+from .contracts import ServiceName
 from .transport import LengthPrefixedJsonTransport
 
 
@@ -53,6 +67,9 @@ class DemoRuntime:
     config: DemoWebConfig
     backend: ConcreteDemoBackend
     guidance: SideMasterGuidanceClient | None
+    operations: OperationsService
+    security: BootstrapSessionManager
+    bootstrap_fragment_token: str
 
 
 class ConcreteDemoBackend:
@@ -474,7 +491,41 @@ def build_demo_runtime(project_root: str | Path, *, host: str, port: int) -> Dem
         session_token=token_urlsafe(48),
         csrf_token=token_urlsafe(48),
     )
-    return DemoRuntime(config=config, backend=backend, guidance=guidance)
+    operator_sid = _current_operator_sid()
+    configuration = ConfigurationStore(
+        root / ".operations-state" / "configuration",
+        operator_identity=operator_sid,
+        campaign_active=backend.active_campaign,
+    )
+    tester = ConfigurationSectionTester(current_operator_sid=lambda: _current_operator_sid())
+    active_version = max(1, int(configuration.read_active().get("version", 0)))
+    supervisor = FixedServiceSupervisor(
+        root / ".operations-state" / "supervisor",
+        specs=_service_specs(root, active_version),
+        runtime=LocalProcessRuntime(),
+    )
+    operations = OperationsService(
+        configuration,
+        tester,
+        supervisor,
+        candidate_ready=lambda: candidate is not None and candidate.ready,
+    )
+    security = BootstrapSessionManager(
+        allowed_origin=config.allowed_origin,
+        expected_operator_sid=operator_sid,
+        current_operator_sid=_current_operator_sid,
+        session_token=config.session_token,
+        csrf_token=config.csrf_token,
+    )
+    fragment_token = security.issue_fragment_token()
+    return DemoRuntime(
+        config=config,
+        backend=backend,
+        guidance=guidance,
+        operations=operations,
+        security=security,
+        bootstrap_fragment_token=fragment_token,
+    )
 
 
 def _load_candidate(path: Path) -> DemoCandidate | None:
@@ -727,3 +778,81 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("duplicate JSON key")
         value[key] = item
     return value
+
+
+def _current_operator_sid() -> str:
+    if os.name != "nt":
+        return "local-user:" + getpass.getuser()
+    completed = subprocess.run(
+        ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = list(csv.reader(StringIO(completed.stdout)))
+    if len(rows) != 1 or len(rows[0]) < 2 or not rows[0][1].startswith("S-"):
+        raise ValueError("DEMO_OPERATOR_IDENTITY_INVALID")
+    return rows[0][1]
+
+
+def _service_specs(root: Path, configuration_version: int) -> dict[ServiceName, ServiceSpec]:
+    rust = root / "auto-tride-rust"
+    agentd = _first_existing(
+        rust / "target" / "release" / "agentd.exe",
+        rust / "target" / "debug" / "agentd.exe",
+    )
+    modeld = _first_existing(
+        rust / "target" / "release" / "modeld.exe",
+        rust / "target" / "debug" / "modeld.exe",
+    )
+    return {
+        ServiceName.RESEARCH: ServiceSpec(
+            service=ServiceName.RESEARCH,
+            executable=agentd,
+            executable_digest=_executable_digest(agentd),
+            argument_template=("serve",),
+            endpoint_template="tcp://127.0.0.1:18801",
+            configuration_version=configuration_version,
+            working_directory=rust,
+        ),
+        ServiceName.MODEL_XTP: ServiceSpec(
+            service=ServiceName.MODEL_XTP,
+            executable=modeld,
+            executable_digest=_executable_digest(modeld),
+            argument_template=(
+                "serve",
+                "--config",
+                str(root / ".demo-state" / "runs" / "XTP" / "modeld.json"),
+            ),
+            endpoint_template="local://modeld-xtp",
+            configuration_version=configuration_version,
+            working_directory=rust,
+        ),
+        ServiceName.MODEL_TORA: ServiceSpec(
+            service=ServiceName.MODEL_TORA,
+            executable=modeld,
+            executable_digest=_executable_digest(modeld),
+            argument_template=(
+                "serve",
+                "--config",
+                str(root / ".demo-state" / "runs" / "TORA" / "modeld.json"),
+            ),
+            endpoint_template="local://modeld-tora",
+            configuration_version=configuration_version,
+            working_directory=rust,
+        ),
+    }
+
+
+def _first_existing(*paths: Path) -> Path:
+    return next((path for path in paths if path.is_file()), paths[0])
+
+
+def _executable_digest(path: Path) -> str:
+    if not path.is_file():
+        return "sha256:" + sha256(("missing:" + str(path)).encode()).hexdigest()
+    hasher = sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(block)
+    return "sha256:" + hasher.hexdigest()

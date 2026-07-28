@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .security import BootstrapSessionManager
+from .contracts import OperationRejected
 
 
 _SESSION_COOKIE = "auto_trade_host_session"
@@ -141,6 +142,24 @@ class DemoGuidanceBackend(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class DemoOperationsBackend(Protocol):
+    """Configuration and fixed process control, with no generic command surface."""
+
+    def system(self) -> dict[str, Any]: ...
+
+    def configuration_draft(self) -> dict[str, Any]: ...
+
+    def update_configuration(self, command: dict[str, Any]) -> dict[str, Any]: ...
+
+    def test_configuration(self, command: dict[str, Any]) -> dict[str, Any]: ...
+
+    def activate_configuration(self, command: dict[str, Any]) -> dict[str, Any]: ...
+
+    def control_service(
+        self, service: str, action: str, command: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+
 class CampaignStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -185,6 +204,30 @@ class BootstrapExchangeRequest(BaseModel):
     fragment_token: str = Field(min_length=32, max_length=256)
 
 
+class ConfigurationUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_revision: int = Field(ge=0)
+    sections: dict[str, dict[str, Any]]
+    secret_updates: dict[str, str] = Field(default_factory=dict)
+    clear_secrets: list[str] = Field(default_factory=list)
+
+
+class ConfigurationTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    section: Literal["operator", "ports", "rqdata", "master_route", "worker_route", "xtp", "tora"]
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=16, max_length=128)
+
+
+class RevisionedOperationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=16, max_length=128)
+
+
 class _ResponseRedactionError(RuntimeError):
     pass
 
@@ -195,6 +238,7 @@ def create_demo_app(
     guidance: DemoGuidanceBackend | None = None,
     *,
     security: BootstrapSessionManager | None = None,
+    operations: DemoOperationsBackend | None = None,
 ) -> FastAPI:
     """Create the exact allowlisted local API surface."""
 
@@ -302,6 +346,64 @@ def create_demo_app(
         def get_current_operator() -> JSONResponse:
             return _invoke(security.operator_projection, accepted=False)
 
+    if operations is not None:
+
+        @app.get("/api/v1/system", dependencies=read_dependencies)
+        def get_system() -> JSONResponse:
+            return _invoke(operations.system, accepted=False)
+
+        @app.get("/api/v1/config/draft", dependencies=read_dependencies)
+        def get_configuration_draft() -> JSONResponse:
+            return _invoke(operations.configuration_draft, accepted=False)
+
+        @app.put("/api/v1/config/draft", dependencies=write_dependencies)
+        def update_configuration_draft(command: ConfigurationUpdateRequest) -> JSONResponse:
+            return _invoke(
+                lambda: operations.update_configuration(command.model_dump(mode="json")),
+                accepted=False,
+            )
+
+        @app.post(
+            "/api/v1/config/draft/test",
+            dependencies=write_dependencies,
+            status_code=202,
+        )
+        def test_configuration_draft(command: ConfigurationTestRequest) -> JSONResponse:
+            return _invoke(
+                lambda: operations.test_configuration(command.model_dump(mode="json")),
+                accepted=True,
+            )
+
+        @app.post(
+            "/api/v1/config/draft/activate",
+            dependencies=write_dependencies,
+            status_code=202,
+        )
+        def activate_configuration_draft(command: RevisionedOperationRequest) -> JSONResponse:
+            return _invoke(
+                lambda: operations.activate_configuration(command.model_dump(mode="json")),
+                accepted=True,
+            )
+
+        @app.post(
+            "/api/v1/services/{service}/{action}",
+            dependencies=write_dependencies,
+            status_code=202,
+        )
+        def control_fixed_service(
+            service: Literal["research", "model_xtp", "model_tora"],
+            action: Literal["start", "stop", "restart"],
+            command: RevisionedOperationRequest,
+        ) -> JSONResponse:
+            return _invoke(
+                lambda: operations.control_service(
+                    service,
+                    action,
+                    command.model_dump(mode="json"),
+                ),
+                accepted=True,
+            )
+
     @app.get("/api/v1/readiness", dependencies=read_dependencies)
     def get_readiness() -> JSONResponse:
         return _invoke(backend.readiness, accepted=False)
@@ -401,6 +503,8 @@ def _invoke(operation: Any, *, accepted: bool) -> JSONResponse:
         _assert_public_response(data)
     except _ResponseRedactionError:
         return _error_response(500, "RESPONSE_REDACTION_FAILED")
+    except OperationRejected as error:
+        return _error_response(error.status_code, error.code)
     except Exception:
         return _error_response(500, "BACKEND_OPERATION_FAILED")
     revision = data.get("revision", 0) if isinstance(data, Mapping) else 0

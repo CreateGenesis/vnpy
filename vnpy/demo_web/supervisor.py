@@ -7,8 +7,11 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import subprocess
 from threading import RLock
+from time import sleep
 from typing import Any, Protocol
+from urllib.request import urlopen
 
 from .contracts import ServiceAction, ServiceName
 
@@ -33,6 +36,7 @@ class ServiceSpec:
     endpoint_template: str
     configuration_version: int
     default_port: int | None = None
+    working_directory: Path | None = None
 
     def validate(self) -> None:
         if (
@@ -63,6 +67,80 @@ class ProcessRuntime(Protocol):
     def terminate(self, pid: int) -> None: ...
 
     def healthy(self, spec: ServiceSpec, identity: ProcessIdentity, endpoint: str) -> bool: ...
+
+
+class LocalProcessRuntime:
+    """Spawn only fixed specs and reconstruct exact identities after restart."""
+
+    def __init__(self) -> None:
+        self._children: dict[int, subprocess.Popen[bytes]] = {}
+
+    def spawn(self, spec: ServiceSpec, arguments: tuple[str, ...]) -> ProcessIdentity:
+        if not spec.executable.is_file() or _file_digest(spec.executable) != spec.executable_digest:
+            raise SupervisorError("SUPERVISOR_EXECUTABLE_MISMATCH")
+        child = subprocess.Popen(
+            [str(spec.executable), *arguments],
+            cwd=spec.working_directory,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        self._children[child.pid] = child
+        for _ in range(50):
+            identity = self.inspect(child.pid)
+            if identity is not None:
+                return identity
+            if child.poll() is not None:
+                break
+            sleep(0.01)
+        child.kill()
+        raise SupervisorError("SUPERVISOR_PROCESS_IDENTITY_UNAVAILABLE")
+
+    def inspect(self, pid: int) -> ProcessIdentity | None:
+        child = self._children.get(pid)
+        if child is not None and child.poll() is not None:
+            return None
+        try:
+            executable, created = _inspect_process(pid)
+            return ProcessIdentity(
+                pid=pid,
+                creation_time_ns=created,
+                executable_digest=_file_digest(executable),
+            )
+        except (OSError, SupervisorError):
+            return None
+
+    def terminate(self, pid: int) -> None:
+        child = self._children.pop(pid, None)
+        if child is not None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill.exe", "/PID", str(pid), "/T"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            os.kill(pid, 15)
+
+    def healthy(self, spec: ServiceSpec, identity: ProcessIdentity, endpoint: str) -> bool:
+        if self.inspect(identity.pid) != identity:
+            return False
+        if spec.service is not ServiceName.WEB:
+            return True
+        try:
+            with urlopen(endpoint, timeout=1) as response:  # noqa: S310 - fixed loopback spec
+                return response.status == 200
+        except OSError:
+            return False
 
 
 class FixedServiceSupervisor:
@@ -229,6 +307,20 @@ class FixedServiceSupervisor:
     ) -> dict[str, Any]:
         descriptor = state["services"].get(service.value)
         if descriptor is not None:
+            observed = self._runtime.inspect(descriptor["pid"])
+            expected = ProcessIdentity(
+                pid=descriptor["pid"],
+                creation_time_ns=descriptor["creation_time_ns"],
+                executable_digest=descriptor["executable_digest"],
+            )
+            if observed != expected:
+                return self._set_failure(
+                    state,
+                    service,
+                    descriptor,
+                    "orphaned",
+                    "SUPERVISOR_PROCESS_IDENTITY_MISMATCH",
+                )
             self._runtime.terminate(descriptor["pid"])
         if increment:
             state["revision"] += 1
@@ -298,3 +390,50 @@ class FixedServiceSupervisor:
 def _digest(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + sha256(encoded).hexdigest()
+
+
+def _file_digest(path: Path) -> str:
+    hasher = sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(block)
+    return "sha256:" + hasher.hexdigest()
+
+
+def _inspect_process(pid: int) -> tuple[Path, int]:
+    if os.name != "nt":
+        executable = Path(os.readlink(f"/proc/{pid}/exe"))
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
+        return executable, int(fields[21])
+
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        raise OSError("process unavailable")
+    try:
+        class FileTime(ctypes.Structure):
+            _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+        creation = FileTime()
+        exit_time = FileTime()
+        kernel = FileTime()
+        user = FileTime()
+        if not ctypes.windll.kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            raise OSError("process time unavailable")
+        size = wintypes.DWORD(32_768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            raise OSError("process executable unavailable")
+        created = (creation.high << 32) | creation.low
+        return Path(buffer.value), created * 100
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)

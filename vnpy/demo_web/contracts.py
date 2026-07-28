@@ -12,6 +12,13 @@ _DIGEST = r"^(?:sha256|blake3):[0-9a-f]{64}$"
 _SYMBOL = r"^[0-9]{6}\.(?:SH|SZ|BJ)$"
 
 
+class OperationRejected(RuntimeError):
+    def __init__(self, code: str, *, status_code: int = 409) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status_code = status_code
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

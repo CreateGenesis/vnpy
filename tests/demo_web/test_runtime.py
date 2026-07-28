@@ -29,6 +29,7 @@ def test_runtime_starts_blocked_without_candidate_or_local_services(tmp_path: Pa
 
     readiness = runtime.backend.readiness()
     projection = runtime.backend.projection()
+    system = runtime.operations.system()
 
     assert readiness["ready"] is False
     assert readiness["state"] == "blocked"
@@ -42,6 +43,14 @@ def test_runtime_starts_blocked_without_candidate_or_local_services(tmp_path: Pa
     assert projection["current"]["campaign_state"] == "unavailable"
     assert projection["permitted_actions"] == ["emergency_stop"]
     assert runtime.guidance is None
+    assert system["configuration"] == {
+        "state": "unconfigured",
+        "active_version": 0,
+        "draft_revision": 0,
+    }
+    assert len(system["actions"]) >= 20
+    assert all(action["action_id"] for action in system["actions"])
+    assert len(runtime.bootstrap_fragment_token) >= 32
 
 
 def test_runtime_rejects_malformed_candidate_and_non_loopback_descriptors(
