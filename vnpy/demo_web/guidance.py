@@ -13,6 +13,8 @@ from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from .research import ResearchTaskV1
+
 from blake3 import blake3
 from pydantic import (
     BaseModel,
@@ -224,6 +226,7 @@ class _GuidanceRevision(_StrictModel):
 class _DecisionReceipt(_StrictModel):
     proposal: _Proposal
     guidance: _GuidanceRevision | None
+    research_task: ResearchTaskV1 | None = None
     idempotency_key: str = Field(min_length=16, max_length=128)
     decision_digest: str = Field(pattern=_DIGEST_PATTERN)
 
@@ -338,7 +341,16 @@ class SideMasterGuidanceClient:
                 or guidance.active_campaign_immutable != active_campaign
             ):
                 raise RuntimeError("GUIDANCE_CONFIRMATION_RESPONSE_INVALID")
-        elif receipt.guidance is not None:
+            if receipt.research_task is None or (
+                receipt.research_task.source != "side_master_proposal"
+                or receipt.research_task.source_digest
+                != parsed.expected_proposal_digest
+                or receipt.research_task.operator_confirmation_digest
+                != guidance.guidance_digest
+                or receipt.research_task.mission_id != receipt.proposal.mission_id
+            ):
+                raise RuntimeError("GUIDANCE_RESEARCH_TASK_RESPONSE_INVALID")
+        elif receipt.guidance is not None or receipt.research_task is not None:
             raise RuntimeError("GUIDANCE_REJECTION_CREATED_EFFECT")
         public = receipt.model_dump(mode="json")
         _assert_no_forbidden_response(public)

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from html import escape
 from hmac import compare_digest
 from pathlib import Path
+import re
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -142,6 +143,20 @@ class DemoGuidanceBackend(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class DemoResearchBackend(Protocol):
+    """Research-only task control; this surface has no broker capabilities."""
+
+    def list_tasks(self) -> dict[str, Any]: ...
+
+    def create_task(self, command: dict[str, Any]) -> dict[str, Any]: ...
+
+    def cancel_task(
+        self, task_id: str, command: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    def projection(self) -> dict[str, Any]: ...
+
+
 class DemoOperationsBackend(Protocol):
     """Configuration and fixed process control, with no generic command surface."""
 
@@ -204,6 +219,46 @@ class SideMasterDecisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=16, max_length=128)
 
 
+class ResearchTaskCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    mission_id: str = Field(min_length=1, max_length=128)
+    objective: str = Field(min_length=1, max_length=8_000)
+    constraints: list[str] = Field(default_factory=list, max_length=64)
+    data_references: list[str] = Field(default_factory=list, max_length=64)
+    priority: Literal["routine", "high", "safety"] = "routine"
+    expires_at_ms: int = Field(gt=0)
+    idempotency_key: str = Field(min_length=16, max_length=128)
+
+    @field_validator("mission_id", "objective")
+    @classmethod
+    def require_nonblank_research_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("blank research value")
+        return value
+
+    @field_validator("constraints")
+    @classmethod
+    def validate_constraints(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() or len(item) > 512 for item in value):
+            raise ValueError("invalid research constraint")
+        return value
+
+    @field_validator("data_references")
+    @classmethod
+    def validate_data_references(cls, value: list[str]) -> list[str]:
+        if any(re.fullmatch(_DIGEST_PATTERN, item) is None for item in value):
+            raise ValueError("invalid research data reference")
+        return value
+
+
+class ResearchTaskCancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_task_digest: str = Field(pattern=_DIGEST_PATTERN)
+    idempotency_key: str = Field(min_length=16, max_length=128)
+
+
 class BootstrapExchangeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -249,6 +304,7 @@ def create_demo_app(
     *,
     security: BootstrapSessionManager | None = None,
     operations: DemoOperationsBackend | None = None,
+    research: DemoResearchBackend | None = None,
 ) -> FastAPI:
     """Create the exact allowlisted local API surface."""
 
@@ -465,6 +521,43 @@ def create_demo_app(
     def get_evidence(campaign_id: UUID) -> JSONResponse:
         return _invoke(lambda: backend.evidence(str(campaign_id)), accepted=False)
 
+    @app.get("/api/v1/research/tasks", dependencies=read_dependencies)
+    def list_research_tasks() -> JSONResponse:
+        if research is None:
+            return _error_response(503, "RESEARCH_SERVICE_UNAVAILABLE")
+        return _invoke(research.list_tasks, accepted=False)
+
+    @app.post(
+        "/api/v1/research/tasks",
+        dependencies=write_dependencies,
+        status_code=202,
+    )
+    def create_research_task(command: ResearchTaskCreateRequest) -> JSONResponse:
+        if research is None:
+            return _error_response(503, "RESEARCH_SERVICE_UNAVAILABLE")
+        return _invoke(
+            lambda: research.create_task(command.model_dump(mode="json")),
+            accepted=True,
+        )
+
+    @app.post(
+        "/api/v1/research/tasks/{task_id}/cancel",
+        dependencies=write_dependencies,
+        status_code=202,
+    )
+    def cancel_research_task(
+        task_id: UUID,
+        command: ResearchTaskCancelRequest,
+    ) -> JSONResponse:
+        if research is None:
+            return _error_response(503, "RESEARCH_SERVICE_UNAVAILABLE")
+        return _invoke(
+            lambda: research.cancel_task(
+                str(task_id), command.model_dump(mode="json")
+            ),
+            accepted=True,
+        )
+
     @app.post(
         "/api/v1/chat/messages",
         dependencies=write_dependencies,
@@ -515,6 +608,12 @@ def create_demo_app(
                 await websocket.send_json(
                     {"event": "projection.snapshot", "data": projection}
                 )
+                if research is not None:
+                    research_projection = research.projection()
+                    _assert_public_response(research_projection)
+                    await websocket.send_json(
+                        {"event": "research.snapshot", "data": research_projection}
+                    )
                 await sleep(1)
             except WebSocketDisconnect:
                 return

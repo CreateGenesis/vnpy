@@ -56,6 +56,33 @@ def proposal(state: str = "pending") -> dict[str, Any]:
     }
 
 
+def research_task() -> dict[str, Any]:
+    return {
+        "contract_version": 1,
+        "task_id": "4a216598-1144-4b21-8714-a711c66f9f31",
+        "task_digest": digest("research-task"),
+        "source": "side_master_proposal",
+        "source_digest": digest("proposal"),
+        "operator_confirmation_digest": digest("guidance"),
+        "mission_id": "research-mission-1",
+        "objective": "Research lower-turnover drawdown controls",
+        "constraints": [
+            "research_only",
+            "no_trading_authority",
+            "active_candidate_immutable",
+        ],
+        "data_references": [],
+        "budget_digest": digest("budget"),
+        "author_lineage_digest": digest("author-lineage"),
+        "priority": "routine",
+        "created_at_ms": 1_000,
+        "expires_at_ms": 86_401_000,
+        "deduplication_key": f"side-master-proposal:{PROPOSAL_ID}",
+        "not_before_boundary": "campaign_terminal",
+        "state": "queued",
+    }
+
+
 def chat_result(
     *,
     content: str,
@@ -164,6 +191,7 @@ class RecordingGuidanceTransport:
             result = {
                 "proposal": decided,
                 "guidance": guidance,
+                "research_task": research_task() if decision == "confirm" else None,
                 "idempotency_key": idempotency_key,
                 "decision_digest": digest(f"decision:{decision}"),
             }
@@ -328,8 +356,10 @@ def test_confirmation_is_future_research_only_and_rejection_creates_no_guidance(
     assert confirmed["proposal"]["state"] == "confirmed"
     assert confirmed["guidance"]["scope"] == "future_research_only"
     assert confirmed["guidance"]["active_campaign_immutable"] is True
+    assert confirmed["research_task"] == research_task()
     assert rejected["proposal"]["state"] == "rejected"
     assert rejected["guidance"] is None
+    assert rejected["research_task"] is None
     decision_payloads = [
         payload
         for _, operation, payload in transport.calls
